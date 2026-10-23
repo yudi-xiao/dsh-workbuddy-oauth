@@ -81,11 +81,13 @@ dsh plugin --profile desktop remove dsh-workbuddy-oauth
 
 ### 在 DSH 模型页里长什么样
 
-WorkBuddy 的路由是标准 `llm-pi-ai` provider，但**不是** pi-ai 内置的 catalog provider（`openai-codex` 那种）。插件在 configurable-provider 目录里把路由登记为 `nativeAuth: { env: [], oauth: true }`，模型页据此把它渲染成**登录按钮**，而不是「填 endpoint + 填 API key」的表单——和 `openai-codex` 看到的一致。
+WorkBuddy 的路由是标准 `llm-pi-ai` provider，但**不是** pi-ai 内置的 catalog provider。模型页因此把它显示成「provider + 端点 + API key + 模型清单」的表单，而 `openai-codex` 只显示一个登录按钮。
 
-pi-ai 的内置清单在编译期生成，第三方插件无法加入，所以这条路是宿主目前能提供的最接近形态。端点与模型清单由插件自动维护，不需要手填。
+**这个差异无法消除。** 模型页是否隐藏 API key 输入框，取决于目录项上的 `nativeAuth`；而任何写进 `llm-pi-ai.providers` 的路由，其目录项都由 `llm-pi-ai` 自己声明（不带 `nativeAuth`）。插件再为同一 provider 注册会直接抛 `DUPLICATE_DIRECTORY`，所以第三方无法覆盖它。pi-ai 的内置清单在编译期生成，插件也加不进去。
 
-登录走的是插件自己的设备码流程，多账号、账号冷却和会话粘性都保留：插件不把凭据交给 pi-ai 的 OAuth 存储，而是继续存在自己的按账号文件里，回环端点按请求选号。
+实际影响很小：**端点、凭据引用和模型清单都由插件自动写入**，表单里每一项都是已填好的状态，不需要你输入任何东西。你在模型页看到的是一份可查看、可修改的配置，而不是待填的空白。
+
+登录仍然是插件自己的设备码流程（`/wb-login` 或卡片按钮），多账号、账号冷却和会话粘性都保留：插件不把凭据交给 pi-ai 的 OAuth 存储，而是存在自己的按账号文件里，回环端点按请求选号。
 
 ### 模型管理（本地新实现）
 

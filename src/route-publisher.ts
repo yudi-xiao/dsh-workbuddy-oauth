@@ -32,27 +32,6 @@ function object(value: unknown): Record<string, unknown> | undefined {
     ? value as Record<string, unknown> : undefined
 }
 
-/**
- * The settings namespace `llm-pi-ai` is mounted under in this composition.
- *
- * Discovered rather than assumed: a profile may mount the plugin under any
- * entry id, and the configurable-provider directory must name the namespace the
- * page will actually read. Matched on the module specifier, because that is the
- * only stable identity — the id is the profile's own choice.
- *
- * @param ctx - the plugin context carrying the optional `configEditor`.
- * @returns the entry id, or `undefined` when the service is absent or the
- *   module is mounted more than once (an ambiguous answer is worse than none).
- */
-export function piAiSettingsNs(ctx: Context): string | undefined {
-  const editor = ctx.get('configEditor') as { entries(): Array<{ options: { name: string; id: string } }> } | undefined
-  if (editor === undefined) return undefined
-  const ids = editor.entries()
-    .filter(entry => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai')
-    .map(entry => entry.options.id)
-  return ids.length === 1 ? ids[0] : undefined
-}
-
 export function storedRoute(ctx: Context, providerId: string): unknown {
   return object(object(descriptorOf(ctx)?.value)?.['providers'])?.[providerId]
 }

@@ -3,7 +3,7 @@
 Upstream: https://github.com/molly-ovo/dsh-workbuddy-oauth
 Base commit: 3fcb35d6a0d147b5e97bfc076c8d2a9a2ddcce29
 Base version: 0.0.4
-Local version: 0.0.5-dsh021.1
+Local version: 0.0.5-dsh021.2
 Reviewed protocol patch: PR #1, exact head c0aef77b13a5eb5d97e293fa9ba8a869b377675b.
 
 This repository is a maintained branch of that upstream, tracking **DSH
@@ -76,17 +76,10 @@ list and there is one place that decides what a route serves.
 - The endpoint's bearer goes to the credential seam under a per-region
   reference, so no secret enters the configuration file. The legacy shared
   `WORKBUDDY_OAUTH_TOKEN` is migrated on the next publish.
-- `provider-directory.ts` advertises each route with
-  `nativeAuth: { env: [], oauth: true }`. That pair is what makes the Models
-  page render a **sign-in button instead of an endpoint/API-key form** — the
-  presentation `openai-codex` gets from being a pi-ai catalog provider. A
-  third-party plugin cannot join pi-ai's build-time catalog, so this directory
-  entry is the closest equivalent the host exposes.
-- `authorization-flow.ts` registers the sign-in behind that button under the
-  `llm-pi-ai/<provider>` credential key, driving the same `begin`/`complete`
-  pair as `/wb-login`. It deliberately commits **no** pi-ai credential record:
-  accounts stay in this plugin's own per-file store, which is what keeps the
-  rotating pool, per-account cooldown and session affinity working.
+- The route is presented by the Models page as an ordinary declared provider:
+  provider key, endpoint, credential reference and model list. It is **not**
+  presented as a sign-in-only row like `openai-codex`, and that cannot be
+  changed from here — see below.
 - The settings card shows the upstream catalog read-only and reports the
   published route's state. It offers an explicitly confirmed import that
   replaces the route's model list, and says so before doing it. Model
@@ -118,7 +111,7 @@ All of the following ran in this repository's own checkout with
 - `pnpm typecheck` — both projects (`tsconfig.json` for the Host half,
   `tsconfig.client.json` for the browser half) exit 0 against DSH
   `0.2.1-rc.2` and pi-ai `1.1.0`.
-- `pnpm test` — Vitest, 28 files / 374 tests, all passing. The suite never
+- `pnpm test` — Vitest, 27 files / 357 tests, all passing. The suite never
   touches the network: upstream chat, probe, catalog refresh and OAuth calls
   are mocked, and the loopback shim is exercised over real local HTTP.
 - `pnpm build` — tsdown emits `lib/index.js` + `lib/index.d.ts` (ESM, Host) and
@@ -166,16 +159,60 @@ The desktop profile has since been switched from the local tarball to
 (`application: applied`), and the installed package carries the directory-entry
 code.
 
-**The OAuth presentation has not been observed in a running DSH yet.** The
-directory registration and sign-in flow were added after the running instance
-started, so these still need a restart to confirm:
+Confirmed against a restarted instance:
 
-1. Settings → Models lists WorkBuddy with a sign-in button and no endpoint or
-   API-key fields.
-2. Pressing it reaches the plugin's device-code login.
-3. An existing route's `apiKeyEnv` migrates from the legacy shared
-   `WORKBUDDY_OAUTH_TOKEN` to the per-region reference without touching its
-   models.
+- Both listeners bind 39271/39272 and the status route reports the per-region
+  `route` field.
+- The existing route's `apiKeyEnv` migrated from the legacy shared
+  `WORKBUDDY_OAUTH_TOKEN` to `WORKBUDDY_OAUTH_GLOBAL_TOKEN` **without touching
+  its models**: still two entries, still 1M context windows, `compat` added.
+
+### Why a sign-in-only row is not achievable
+
+An attempt was made to make the Models page render WorkBuddy like
+`openai-codex`: register the route in the configurable-provider directory with
+`nativeAuth: { env: [], oauth: true }` (the pair the page keys
+`keylessNativeAuth` on, which suppresses the API-key field) and register an
+authorization flow under `llm-pi-ai/<provider>`.
+
+**It cannot work, and the code was removed rather than shipped inert.**
+
+- `llm-pi-ai`'s `directoryEntries()` declares an entry for **every profile in
+  its `providers` config**, not only for pi-ai catalog providers. Any route a
+  plugin publishes there therefore already has a directory entry, and that entry
+  carries no `nativeAuth` — which is exactly why the page renders the form.
+- `LlmRuntime.registerConfigurableProviders` rejects a provider that is already
+  in the global directory and not owned by the calling handle, with
+  `DUPLICATE_DIRECTORY`. Registering the same route from a plugin therefore
+  always fails; the reverse order corrupts `llm-pi-ai`'s own directory update.
+- Only `providerDefaultsOf(installed)` supplies `nativeAuth`, and `installed`
+  comes from pi-ai's build-time catalog (`builtinProviders()`), which a
+  third-party plugin cannot extend.
+
+So the presentation is bounded by the host: a route configured through
+`llm-pi-ai.providers` is always shown as a declared route. What the plugin does
+guarantee is that the form arrives **already filled in** — endpoint, credential
+reference and models are written by the plugin, so nothing needs typing.
+
+### Legacy state removed
+
+The old card offered per-model hiding and a maximum-window switch. Both decisions
+were persisted in `$DSH_HOME/workbuddy-oauth/` and were still read at startup
+after the UI was removed, which made them unmanageable knobs that silently
+affected any later import:
+
+- `hidden-models.json` hid 27 international models.
+- `preferences.json` set `useMaximumContextWindow: true`.
+
+Both files were deleted after confirming the published route already encodes
+their outcome (two models at 1M context). `preferences.json` in particular would
+have dropped the published window from 1M to the upstream default on the next
+import. A snapshot of the route as it stood is kept at
+`$DSH_HOME/workbuddy-oauth/route-snapshot-workbuddy-oauth-ai.yml`.
+
+Import remains destructive by design: it replaces the route's model list. Since
+the route is now the source of truth, curate models on the Models page rather
+than re-importing.
 
 ## Limitations
 

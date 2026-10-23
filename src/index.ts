@@ -36,13 +36,10 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import {
-  piAiSettingsNs,
   publishProviderRoute,
   storedRoute,
   type PublishOutcome,
 } from './route-publisher.ts'
-import { directoryEntryOf, registerDirectory, type DirectoryEntry } from './provider-directory.ts'
-import { registerSignInFlow } from './authorization-flow.ts'
 import { routeApiKeyEnv } from './provider-config.ts'
 import { FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, WorkBuddyCatalog } from './catalog.ts'
 import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
@@ -361,33 +358,6 @@ function routeViewOf(ctx: Context, runtime: RegionRuntime): WorkBuddyWebRoute {
 }
 
 /**
- * Advertise one region's route as an OAuth provider in the Models page.
- *
- * Registration is all-or-nothing in the LLM service, and a provider already
- * declared by another registration is a hard error — so both regions are
- * registered together from one place, not one call per region. This function
- * therefore only records the region's entry; the single registration happens in
- * `apply` once both listeners hold their ports, because an entry's
- * `defaultBaseURL` names the region's own endpoint.
- *
- * @param ctx - the plugin context carrying `ctx.llm`.
- * @param runtime - the region to advertise.
- * @param origin - the loopback origin this region is listening on.
- */
-function directoryEntryFor(ctx: Context, runtime: RegionRuntime, origin: string): DirectoryEntry {
-  return directoryEntryOf({
-    region: runtime.region,
-    providerId: providerIdFor(runtime.region),
-    displayName: regionEndpoints(runtime.region).label,
-    shimOrigin: origin,
-    // The page's editor and this plugin's publish must address the same profile.
-    // Discovered from the live `llm-pi-ai` entry rather than guessed: a profile
-    // may mount that plugin under any id.
-    settingsNs: piAiSettingsNs(ctx) ?? 'llm-pi-ai',
-  })
-}
-
-/**
  * Seed once at startup, or replace models after an explicit sync. Ordinary
  * catalog, preference and account changes never rewrite the Models-page route.
  *
@@ -645,26 +615,6 @@ export function apply(ctx: Context, config: Config): void {
 
   const startups = runtimes.map(runtime => startRegion(runtime))
 
-  /**
-   * Advertise both regions in the configurable-provider directory, once.
-   *
-   * After `startups`, not before: an entry's `defaultBaseURL` names the region's
-   * own loopback port, which only exists once its listener is up. One call for
-   * the whole set, because the LLM service registers all-or-nothing and treats a
-   * provider already declared by another registration as a hard error.
-   *
-   * The failure mode is contained inside `registerDirectory`: a refused set costs
-   * the OAuth presentation (the page falls back to the hand-declared form), not
-   * the routes themselves.
-   */
-  void Promise.all(startups).then(() => {
-    if (stopped) return
-    const entries = runtimes.flatMap(runtime => {
-      const origin = runtime.origin
-      return origin === undefined ? [] : [directoryEntryFor(ctx, runtime, origin)]
-    })
-    if (entries.length > 0) registerDirectory(ctx, entries)
-  })
 
   /**
    * Notice sign-ins that happen while DSH keeps running.
@@ -731,38 +681,6 @@ export function apply(ctx: Context, config: Config): void {
     return { uid: credential.uid, label: displayNameOf(credential) }
   }
 
-  /**
-   * Register the Models page sign-in for each region.
-   *
-   * The directory entry (see `provider-directory.ts`) is what makes the page
-   * show a sign-in button; this is the flow that button runs. It drives the same
-   * `begin`/`completeLogin` pair as `/wb-login` and the settings card, so all
-   * three surfaces sign in through one implementation — the failure this avoids
-   * is a Models page that reports success while the plugin's own store was never
-   * written.
-   *
-   * The flow deliberately commits no pi-ai credential record: accounts stay in
-   * this plugin's own per-file store so the rotating pool, per-account cooldown
-   * and session affinity keep working. `registerSignInFlow` documents why that
-   * is allowed by the seam.
-   */
-  const flowDisposers: Array<() => void> = []
-  for (const runtime of runtimes) {
-    const dispose = registerSignInFlow(
-      ctx,
-      providerIdFor(runtime.region),
-      runtime.region,
-      {
-        begin: async (region) => {
-          const request = await logins.begin(region)
-          return { url: request.url, state: request.state }
-        },
-        complete: completeLogin,
-        isPending: (error: unknown) => error instanceof LoginPendingError,
-      },
-    )
-    if (dispose !== undefined) flowDisposers.push(dispose)
-  }
 
   /**
    * Remove an account and every trace of it, then refresh the catalogs.
@@ -1004,7 +922,6 @@ export function apply(ctx: Context, config: Config): void {
     stopped = true
     for (const timer of timers) clearInterval(timer)
     for (const dispose of commandDisposers) dispose()
-    for (const dispose of flowDisposers) dispose()
     await Promise.all(startups)
     await Promise.all(shims.map(close => close()))
   })
