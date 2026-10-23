@@ -50,7 +50,19 @@ export type WorkBuddyLocaleKey =
   | 'logoutSucceeded'
   | 'enableSucceeded'
   | 'disableSucceeded'
-  // Models
+  // Models — publishing into the `llm-pi-ai` provider configuration
+  | 'modelsPublishIntro'
+  | 'upstreamCatalog'
+  | 'syncProviderConfirmBody'
+  | 'syncProviderConfirmAction'
+  | 'routeProvider'
+  | 'routeEndpoint'
+  | 'routeConfigured'
+  | 'routeUnconfigured'
+  | 'routeModelCount'
+  | 'syncProvider'
+  | 'syncProviderSucceeded'
+  | 'syncProviderFailed'
   | 'useMaximumContextWindow'
   | 'maxWindowHintOn'
   | 'maxWindowHintOff'
@@ -136,6 +148,19 @@ export const zh: Record<WorkBuddyLocaleKey, string> = {
   maxWindowHintOn: '已开启：{count} 个模型改用最大窗口',
   maxWindowHintOff: '关闭时：{count} 个模型使用较小窗口',
 
+  modelsPublishIntro: '模型由 DSH 原生配置 llm-pi-ai.providers 管理。请前往 DSH 设置 → 模型，编辑模型、上下文窗口和推理选项。本页仅展示上游目录，不代表已配置模型；刷新目录不会覆盖原生配置。',
+  upstreamCatalog: '上游模型目录（只读）',
+  syncProviderConfirmBody: '将用当前上游目录替换 {provider} 的模型列表，覆盖你在 DSH 设置 → 模型中的模型编辑（包括自定义条目、上下文和推理选项）。确定导入？',
+  syncProviderConfirmAction: '确认替换模型列表',
+  routeProvider: 'Provider',
+  routeEndpoint: '端点',
+  routeConfigured: '已写入 DSH 模型配置',
+  routeUnconfigured: '尚未写入 DSH 模型配置',
+  routeModelCount: '{count} 个模型',
+  syncProvider: '导入上游目录（替换模型列表）',
+  syncProviderSucceeded: '已同步到模型配置：{reason}',
+  syncProviderFailed: '同步到模型配置',
+
   creditsHeading: '积分余额',
   creditsIntro: '积分只在你点「查询余额」时向上游获取，避免每次打开设置页都发请求。',
   creditsNone: '还没有账号，登录后即可查看积分。',
@@ -192,7 +217,7 @@ export const en: Record<WorkBuddyLocaleKey, string> = {
   regionGlobal: 'International',
   signedOut: 'Not signed in',
   signedInWithModels: 'Signed in · {count} models',
-  noAccountsInRegion: 'This region is not signed in, so its model list is unavailable.',
+  noAccountsInRegion: 'Sign in to this region to use models or import its catalog.',
 
   tabAccounts: 'Accounts',
   tabModels: 'Models',
@@ -216,6 +241,19 @@ export const en: Record<WorkBuddyLocaleKey, string> = {
   useMaximumContextWindow: 'Use the largest declared context window',
   maxWindowHintOn: 'On: {count} model(s) use the largest window',
   maxWindowHintOff: 'Off: {count} model(s) use a smaller window',
+
+  modelsPublishIntro: 'DSH owns models in llm-pi-ai.providers. Open DSH Settings → Models to edit models, context windows and reasoning options. This is the read-only upstream catalog, not the configured model list; refreshing it does not overwrite native settings.',
+  upstreamCatalog: 'Upstream catalog (read-only)',
+  syncProviderConfirmBody: 'Replace the model list for {provider} with the current upstream catalog? This overwrites model edits in DSH Settings → Models, including custom entries, context windows and reasoning options.',
+  syncProviderConfirmAction: 'Replace model list',
+  routeProvider: 'Provider',
+  routeEndpoint: 'Endpoint',
+  routeConfigured: 'Written to the DSH model configuration',
+  routeUnconfigured: 'Not written to the DSH model configuration yet',
+  routeModelCount: '{count} model(s)',
+  syncProvider: 'Import catalog (replace model list)',
+  syncProviderSucceeded: 'Synced to the model configuration: {reason}',
+  syncProviderFailed: 'Syncing to the model configuration',
 
   creditsHeading: 'Credit balance',
   creditsIntro: 'Credits are fetched only when you ask, so opening settings sends no upstream request.',

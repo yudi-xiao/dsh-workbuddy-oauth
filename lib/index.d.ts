@@ -1,9 +1,6 @@
 import z from "@deepseek-ai/schemastery";
-import "@earendil-works/pi-ai";
-import { PiAiAdapter, PiAiAdapterOptions } from "@deepseek-ai/dsh-llm-pi-ai";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Context } from "@deepseek-ai/cordis";
-import { AttachmentStore } from "@deepseek-ai/dsh-attachment";
 //#region src/region.d.ts
 /**
  * Region (realm) definitions for the two WorkBuddy deployments.
@@ -985,6 +982,69 @@ declare class WorkBuddyCatalog {
   fallback(): readonly WorkBuddyModelInfo[];
 }
 //#endregion
+//#region src/shim.d.ts
+/**
+ * Minimal logger surface the plugin context already provides.
+ *
+ * `info` exists so one line per chat request can report **which account served
+ * it**. Selection behaviour (rotation, cooldown, session affinity) is otherwise
+ * invisible: nothing about the response says which credential produced it, so
+ * without this an operator cannot tell a working rotation from a stuck pool.
+ */
+interface ShimLogger {
+  info(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+}
+/** What the plugin needs from a running shim. */
+interface WorkBuddyShim {
+  /** Resolves once the listener is up; rejects if listening failed. */
+  ready: Promise<void>;
+  /** The shim origin, e.g. `http://127.0.0.1:39271`; valid after ready. */
+  baseUrl(): string;
+  /**
+   * The per-process shared secret the plugin's own client must carry as
+   * `Authorization: Bearer <token>`. Lives only in memory; the adapter
+   * resolves this instead of the upstream access token, because the shim
+   * resolves the real credential itself via the store.
+   */
+  token(): string;
+  /** Stop serving and destroy open connections. */
+  close(): Promise<void>;
+}
+/** Constructor dependencies. */
+interface WorkBuddyShimOptions {
+  store: CredentialStore;
+  client: Pick<WorkBuddyUpstreamClient, 'chatStream'>;
+  catalog: WorkBuddyCatalog;
+  logger?: ShimLogger;
+  /**
+   * Port to bind on `127.0.0.1`, or `0` for an ephemeral one.
+   *
+   * A **stable** port matters now that the endpoint is published into the
+   * `llm-pi-ai` provider configuration: the route's `baseURL` names this origin,
+   * and an ephemeral port would make that configuration stale on every restart.
+   * The caller therefore asks for a fixed port and republishes the route if the
+   * port it actually got differs.
+   */
+  port?: number;
+  /**
+   * The bearer this endpoint requires, when the caller owns its lifetime.
+   *
+   * Ownership moved outward with the same change: the value now has to be
+   * stored in the credential seam under the reference the published route
+   * names, and a secret minted inside this function could not be handed out
+   * before the listener started. Omitting it mints a fresh one, which is still
+   * correct for an in-process caller that reads {@link WorkBuddyShim.token}.
+   */
+  token?: string;
+}
+/**
+ * Start the loopback endpoint. Requests carry any bearer; the loopback bind
+ * is the boundary, and the upstream credential comes from the store alone.
+ */
+declare function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShim;
+//#endregion
 //#region src/probe-store.d.ts
 /**
  * Whether the model's effort parameter is actually validated.
@@ -1106,103 +1166,6 @@ declare class WorkBuddyProbeStore {
    */
   private persist;
 }
-//#endregion
-//#region src/shim.d.ts
-/**
- * Minimal logger surface the plugin context already provides.
- *
- * `info` exists so one line per chat request can report **which account served
- * it**. Selection behaviour (rotation, cooldown, session affinity) is otherwise
- * invisible: nothing about the response says which credential produced it, so
- * without this an operator cannot tell a working rotation from a stuck pool.
- */
-interface ShimLogger {
-  info(...args: unknown[]): void;
-  warn(...args: unknown[]): void;
-  error(...args: unknown[]): void;
-}
-/** What the plugin needs from a running shim. */
-interface WorkBuddyShim {
-  /** Resolves once the listener is up; rejects if listening failed. */
-  ready: Promise<void>;
-  /** The shim origin, e.g. `http://127.0.0.1:39271`; valid after ready. */
-  baseUrl(): string;
-  /**
-   * The per-process shared secret the plugin's own client must carry as
-   * `Authorization: Bearer <token>`. Lives only in memory; the adapter
-   * resolves this instead of the upstream access token, because the shim
-   * resolves the real credential itself via the store.
-   */
-  token(): string;
-  /** Stop serving and destroy open connections. */
-  close(): Promise<void>;
-}
-/** Constructor dependencies. */
-interface WorkBuddyShimOptions {
-  store: CredentialStore;
-  client: Pick<WorkBuddyUpstreamClient, 'chatStream'>;
-  catalog: WorkBuddyCatalog;
-  logger?: ShimLogger;
-}
-/**
- * Start the loopback endpoint. Requests carry any bearer; the loopback bind
- * is the boundary, and the upstream credential comes from the store alone.
- */
-declare function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShim;
-//#endregion
-//#region src/adapter.d.ts
-/** Constructor dependencies. */
-interface WorkBuddyAdapterOptions {
-  providerId?: string;
-  displayName?: string;
-  /**
-   * Region this adapter serves, from the variant descriptor. Decides only
-   * whether the CN `onlyReasoning` veto hides `off` (#87); defaults to `'cn'`.
-   */
-  region?: WorkBuddyRegion;
-  shim: WorkBuddyShim;
-  store: CredentialStore;
-  catalog: WorkBuddyCatalog;
-  /** Resolve the durable attachment service at request time, when present. */
-  resolveAttachments?: () => AttachmentStore | undefined;
-  /** Resolve one image's path in the current model-tool execution world. */
-  resolveImageAccess?: NonNullable<PiAiAdapterOptions['resolveImageAccess']>;
-  /**
-   * Look up a local probe observation for a model. Consulted only for rows the
-   * upstream left undeclared; absent means declared-set-only behavior.
-   */
-  observe?: (modelId: string) => WorkBuddyProbeRecord | undefined;
-  /**
-   * Model ids the current account has hidden from the picker, resolved per
-   * read so an account switch is honored without rebuilding the adapter.
-   *
-   * Hiding is a *listing* concern only: `buildModels()` keeps serving the full
-   * catalog because pi-ai's `resolveModel`/`prepareCall` resolve from the same
-   * snapshot `listModels` reads — filtering the descriptors there would make a
-   * hidden model unresolvable and break sessions already using it. The filter
-   * therefore lives in this adapter's `listModels` override alone.
-   */
-  hidden?: () => readonly string[];
-}
-/** What {@link createWorkBuddyAdapter} hands back. */
-interface WorkBuddyAdapter {
-  adapter: PiAiAdapter;
-  /** Rebuild the adapter's provider snapshot; call after a catalog update. */
-  invalidate: () => void;
-}
-/**
- * Assemble the adapter. The provider's `getModels` reads the live catalog,
- * and every model's `baseUrl` is re-resolved per read so the shim's
- * ephemeral port applies from the first snapshot after startup.
- *
- * The profile is constructed by hand rather than through dsh-llm-pi-ai's
- * internal `resolveProfiles()`: that helper is not part of the package's
- * public export surface (root entry, `lib/` deep imports blocked by the
- * exports map, `src/` not shipped), so hand-assembly is the only supported
- * path and every newly required field must be adopted here explicitly —
- * `modelErrors` since 0.1.5-alpha.2 (#12).
- */
-declare function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBuddyAdapter;
 //#endregion
 //#region src/probe-service.d.ts
 /** What the caller learns about a completed probe. */
@@ -1359,6 +1322,24 @@ interface WorkBuddyWebProbeModel {
   efforts: readonly WorkBuddyEffort[];
   probedAt: number;
 }
+/** One published `llm-pi-ai` route, as the card reports it. */
+interface WorkBuddyWebRoute {
+  /** Provider key under `llm-pi-ai`'s `providers` dict, e.g. `workbuddy-oauth-ai`. */
+  providerId: string;
+  /**
+   * Endpoint the published route points at, i.e. this region's loopback origin.
+   *
+   * Carried so the card can show the user what was written without reading the
+   * configuration itself — the card has no access to another plugin's settings.
+   */
+  baseURL: string;
+  /** Credential reference the route names as its `apiKeyEnv`. */
+  apiKeyEnv: string;
+  /** Whether a route for this provider exists in the `llm-pi-ai` configuration. */
+  configured: boolean;
+  /** Models the published route currently carries; `0` when unconfigured. */
+  modelCount: number;
+}
 /** One region's slice of the status document. */
 interface WorkBuddyWebRegion {
   region: WorkBuddyRegion;
@@ -1380,6 +1361,15 @@ interface WorkBuddyWebRegion {
    * drift away from the card filtering for a group that does not exist.
    */
   providerId: string;
+  /**
+   * The `llm-pi-ai` route this region publishes, and whether it is configured.
+   *
+   * The model list is configuration now rather than something this plugin
+   * serves directly, so the card has to be able to tell the user whether the
+   * route exists, where it points, and how many models it carries — none of
+   * which it can read from another plugin's settings on its own.
+   */
+  route: WorkBuddyWebRoute;
   /**
    * Whether this region has a usable credential.
    *
@@ -1524,6 +1514,16 @@ interface WorkBuddyControlRouteOptions {
    * without a second status round-trip.
    */
   refreshCredits?: (uid: string) => Promise<WorkBuddyControlResult>;
+  /**
+   * Write this region's models into the `llm-pi-ai` provider route.
+   *
+   * The card's counterpart to "the model list is configuration": the plugin
+   * cannot make a model appear in the picker by itself, because the route
+   * belongs to `llm-pi-ai`. Host-side this re-reads the current catalog, so the
+   * button always publishes what the card is showing rather than a list the
+   * browser sent.
+   */
+  syncProvider?: () => Promise<WorkBuddyControlResult>;
   /** Route path to mount; defaults to {@link WORKBUDDY_CONTROL_PATH}. */
   path?: string;
 }
@@ -1584,6 +1584,14 @@ interface WorkBuddyRegionView {
    * flag on each read, exactly like {@link hiddenModels}.
    */
   useMaximumContextWindow: () => boolean;
+  /**
+   * The `llm-pi-ai` route this region publishes, and whether it is configured.
+   *
+   * A function for the same reason as the other contributors: the route is
+   * written by a background publish and can be edited or deleted on the Models
+   * page, so a frozen value would report a state that may already be gone.
+   */
+  route: () => WorkBuddyWebRoute;
 }
 /** Constructor dependencies for {@link workBuddyWebStatus}. */
 interface WorkBuddyStatusRouteOptions {
@@ -1636,6 +1644,23 @@ declare function providerIdFor(region: WorkBuddyRegion): string;
 /** Stream idle timeout, matching the ported client's expectations. */
 declare const WORKBUDDY_STREAM_IDLE_TIMEOUT_MS = 300000;
 /**
+ * Loopback port each region's endpoint asks for.
+ *
+ * Fixed rather than ephemeral because the port is now part of a *published
+ * configuration value*: `providers[<route>].baseURL` names `http://127.0.0.1:<port>/v1`,
+ * and that value outlives the process that wrote it. An ephemeral port would
+ * make every restart leave the route pointing at a dead listener until something
+ * happened to republish it.
+ *
+ * Two distinct ports, because two listeners run in one process. The values are
+ * arbitrary but must stay stable across releases: changing one silently breaks
+ * every existing installation's configuration until the next publish, so a
+ * change here is a migration, not a tweak.
+ *
+ * A bind failure is reported without falling back or changing the saved endpoint.
+ */
+declare const SHIM_PORT_FOR: Readonly<Record<WorkBuddyRegion, number>>;
+/**
  * Whether *automatic* reasoning-effort probing is authorized.
  *
  * **Permanently `false`, and that is a deliberate policy rather than an
@@ -1676,4 +1701,4 @@ declare function accountIdentityOf(credential: Pick<WorkBuddyCredential, 'uid' |
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { ALL_REGIONS, AUTOMATIC_PROBING_AUTHORIZED, COOLDOWN_STATE_FILENAME, Config, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, LoginClient, LoginExpiredError, LoginPendingError, NotSignedInError, PLUGIN_VERSION, PROBE_EFFORT_CANDIDATES, WORKBUDDY_AI_CONTROL_PATH, WORKBUDDY_AI_PROVIDER, WORKBUDDY_CONTROL_KEY_HEADER, WORKBUDDY_CONTROL_PATH, WORKBUDDY_PROVIDER, WORKBUDDY_STATUS_PATH, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WorkBuddyCatalog, type WorkBuddyControlResult, type WorkBuddyCredential, type WorkBuddyModelInfo, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyRegion, type WorkBuddyWebAccount, type WorkBuddyWebModel, type WorkBuddyWebProbeModel, type WorkBuddyWebRegion, type WorkBuddyWebStatus, accountIdentityOf, apply, chooseRotating, controlPathFor, createControlKey, createCredentialStore, createWorkBuddyAdapter, createWorkBuddyShim, credentialFromLogin, deriveId, deviceHeaders, displayNameOf, fingerprintModel, inject, listCredentials, maskPhoneNumbers, name, parseRegionInput, probeModel, providerIdFor, readCooldowns, regionEndpoints, regionOfDomain, requestId, workBuddyControlHandler, workBuddyStatusHandler, workBuddyWebStatus, workbuddyProbePath, writeCooldown };
+export { ALL_REGIONS, AUTOMATIC_PROBING_AUTHORIZED, COOLDOWN_STATE_FILENAME, Config, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, LoginClient, LoginExpiredError, LoginPendingError, NotSignedInError, PLUGIN_VERSION, PROBE_EFFORT_CANDIDATES, SHIM_PORT_FOR, WORKBUDDY_AI_CONTROL_PATH, WORKBUDDY_AI_PROVIDER, WORKBUDDY_CONTROL_KEY_HEADER, WORKBUDDY_CONTROL_PATH, WORKBUDDY_PROVIDER, WORKBUDDY_STATUS_PATH, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WorkBuddyCatalog, type WorkBuddyControlResult, type WorkBuddyCredential, type WorkBuddyModelInfo, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyRegion, type WorkBuddyWebAccount, type WorkBuddyWebModel, type WorkBuddyWebProbeModel, type WorkBuddyWebRegion, type WorkBuddyWebRoute, type WorkBuddyWebStatus, accountIdentityOf, apply, chooseRotating, controlPathFor, createControlKey, createCredentialStore, createWorkBuddyShim, credentialFromLogin, deriveId, deviceHeaders, displayNameOf, fingerprintModel, inject, listCredentials, maskPhoneNumbers, name, parseRegionInput, probeModel, providerIdFor, readCooldowns, regionEndpoints, regionOfDomain, requestId, workBuddyControlHandler, workBuddyStatusHandler, workBuddyWebStatus, workbuddyProbePath, writeCooldown };

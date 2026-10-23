@@ -622,8 +622,14 @@ function turnKeyOf(body: Record<string, unknown> | undefined): string {
  * The session key is the harness's own affinity header, which the shim
  * already reads for account selection (`x-session-id`); pi-ai forwards it
  * through, so a request that arrived with one carries it here.
+ *
+ * Exported because the shim needs the same answer for a different purpose: with
+ * no header available it derives the *account-affinity* key from the body, and
+ * the two must agree — a conversation pinned to one account and a conversation
+ * named in the tracking headers that disagree would split one chat's usage
+ * across two ids.
  */
-function conversationKeyOf(body: Record<string, unknown> | undefined, sessionKey: string | undefined): string {
+export function conversationKeyOf(body: Record<string, unknown> | undefined, sessionKey: string | undefined): string {
   if (sessionKey !== undefined && sessionKey !== '') return `session:${sessionKey}`
   const messages = Array.isArray(body?.['messages']) ? (body['messages'] as unknown[]) : []
   for (const message of messages) {

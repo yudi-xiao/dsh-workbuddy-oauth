@@ -81,6 +81,28 @@ async function post(origin: string, token: string, sessionId?: string | string[]
 }
 
 describe('shim session affinity', () => {
+  it('authenticates each listener only with its own bearer', async () => {
+    const first = await startShim(recordingStore())
+    const second = createWorkBuddyShim({ store: recordingStore(), client: rateLimited as never, catalog: new WorkBuddyCatalog(), port: 0 })
+    await second.ready
+    try {
+      expect(first.token).not.toBe(second.token())
+      expect((await post(first.origin, first.token)).status).not.toBe(401)
+      expect((await post(second.baseUrl(), second.token())).status).not.toBe(401)
+      expect((await post(first.origin, second.token())).status).toBe(401)
+      expect((await post(second.baseUrl(), first.token)).status).toBe(401)
+    } finally { await second.close() }
+  })
+
+  it('rejects a busy requested port instead of choosing an ephemeral one', async () => {
+    const first = await startShim(recordingStore())
+    const second = createWorkBuddyShim({ store: recordingStore(), client: rateLimited as never, catalog: new WorkBuddyCatalog(), port: Number(new URL(first.origin).port) })
+    try {
+      await expect(second.ready).rejects.toMatchObject({ code: 'EADDRINUSE' })
+      expect(() => second.baseUrl()).toThrow()
+    } finally { await second.close() }
+  })
+
   it('forwards x-session-id to the store as the session key', async () => {
     const store = recordingStore()
     const { origin, token } = await startShim(store)
@@ -93,12 +115,44 @@ describe('shim session affinity', () => {
     expect(store.resolveKeys).toEqual(['session-42'])
   })
 
-  it('passes no key when the header is absent', async () => {
+  it('derives a key from the body when the header is absent', async () => {
+    // The published `llm-pi-ai` route cannot send `x-session-id` (pi-ai
+    // withholds `sendSessionAffinityHeaders` from configuration), so the shim
+    // derives the affinity key from the conversation in the body. Without this
+    // every turn of one chat would rotate to a different account.
     const store = recordingStore()
     const { origin, token } = await startShim(store)
 
     await post(origin, token)
-    expect(store.resolveKeys).toEqual([undefined])
+    const [key] = store.resolveKeys
+    expect(key).toBeTypeOf('string')
+    expect(key).not.toBe('')
+    // A digest, never the user's text: the key is held as an affinity map key.
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+    expect(key).not.toContain('hi')
+  })
+
+  it('derives the same key for the same conversation and a new one for a new conversation', async () => {
+    const store = recordingStore()
+    const { origin, token } = await startShim(store)
+
+    const body = (text: string) => JSON.stringify({
+      model: 'hy3',
+      messages: [{ role: 'user', content: text }],
+    })
+    const send = async (text: string): Promise<Response> => fetch(`${origin}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: body(text),
+    })
+
+    await send('first message')
+    await send('first message')
+    await send('a different conversation')
+    const [a, b, c] = store.resolveKeys
+    // Two turns of one chat pin the same account; a different chat does not.
+    expect(a).toBe(b)
+    expect(c).not.toBe(a)
   })
 
   it('treats the header as an opaque key, verbatim', async () => {

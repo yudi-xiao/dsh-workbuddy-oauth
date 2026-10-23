@@ -15,13 +15,13 @@
  * @module dsh-workbuddy-oauth/shim
  */
 
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import type { CredentialStore as WorkBuddyCredentialStore } from './store.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
-import { extractDisplayErrorMessage, prepareChatBody, WorkBuddyUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
+import { conversationKeyOf, extractDisplayErrorMessage, prepareChatBody, WorkBuddyUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /**
  * How long an upstream failure parks an account out of selection.
@@ -94,6 +94,26 @@ export interface WorkBuddyShimOptions {
   client: Pick<WorkBuddyUpstreamClient, 'chatStream'>
   catalog: WorkBuddyCatalog
   logger?: ShimLogger
+  /**
+   * Port to bind on `127.0.0.1`, or `0` for an ephemeral one.
+   *
+   * A **stable** port matters now that the endpoint is published into the
+   * `llm-pi-ai` provider configuration: the route's `baseURL` names this origin,
+   * and an ephemeral port would make that configuration stale on every restart.
+   * The caller therefore asks for a fixed port and republishes the route if the
+   * port it actually got differs.
+   */
+  port?: number
+  /**
+   * The bearer this endpoint requires, when the caller owns its lifetime.
+   *
+   * Ownership moved outward with the same change: the value now has to be
+   * stored in the credential seam under the reference the published route
+   * names, and a secret minted inside this function could not be handed out
+   * before the listener started. Omitting it mints a fresh one, which is still
+   * correct for an in-process caller that reads {@link WorkBuddyShim.token}.
+   */
+  token?: string
 }
 
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
@@ -144,6 +164,43 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 /**
+ * The account-affinity key for one chat, derived from the request body.
+ *
+ * Used only when no `x-session-id` arrived, which is now the normal case: the
+ * published `llm-pi-ai` route cannot set `sendSessionAffinityHeaders` (pi-ai
+ * withholds it from configuration), so the header that used to carry the
+ * conversation never reaches this endpoint.
+ *
+ * The derivation is delegated to {@link conversationKeyOf}, the same function
+ * that names the conversation in the upstream tracking headers, so one chat is
+ * one account *and* one conversation id. An empty answer means the body named
+ * no conversation; `undefined` is then returned so the store falls back to its
+ * ordinary rotation instead of pinning every unnamed request to one key.
+ *
+ * The key is a digest, never the user's text: it is held in memory as an
+ * affinity map key, and a raw first message would put conversation content in
+ * a structure nobody expects to hold it.
+ *
+ * @param raw - the request body exactly as received.
+ * @returns the affinity key, or `undefined` when the body names no conversation.
+ */
+function conversationKeyOfBody(raw: string): string | undefined {
+  let body: Record<string, unknown> | undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    body = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined
+  } catch {
+    // Not JSON: no conversation to name, and the upstream will reject it anyway.
+    return undefined
+  }
+  const key = conversationKeyOf(body, undefined)
+  if (key === '') return undefined
+  return createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 32)
+}
+
+/**
  * Start the loopback endpoint. Requests carry any bearer; the loopback bind
  * is the boundary, and the upstream credential comes from the store alone.
  */
@@ -151,11 +208,12 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   const { store, client, catalog } = options
   const logger = options.logger
 
-  // Per-process shared secret. Lives only in memory; the adapter resolves it
-  // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
-  // The shim never forwards it upstream — the real credential comes from the
-  // store. A local attacker who can hit the port still cannot forge this.
-  const SHARED_SECRET = randomBytes(32).toString('base64url')
+  // The bearer this endpoint requires. Supplied by the caller when the value
+  // also has to be stored in the credential seam (see `WorkBuddyShimOptions`);
+  // otherwise minted here. Either way it never reaches upstream — the real
+  // credential comes from the store — and a local attacker who can reach the
+  // port cannot forge it.
+  const SHARED_SECRET = options.token ?? randomBytes(32).toString('base64url')
 
   /** Constant-time bearer check; absent or mismatched bearers are rejected. */
   function bearerOk(req: IncomingMessage): boolean {
@@ -180,7 +238,7 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     server.once('error', reject)
   })
 
-  server.listen(0, '127.0.0.1')
+  server.listen(options.port ?? 0, '127.0.0.1')
 
   const baseUrl = (): string => {
     const address = server.address()
@@ -214,6 +272,11 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
         return
       }
       if (req.method === 'GET' && (url === '/v1/models' || url === '/v1/models/')) {
+        // Capacities travel with the listing. They are not needed by the route
+        // this plugin publishes — its models are written out explicitly — but a
+        // user who points a *draft* at this endpoint and asks the Models page to
+        // fetch available models gets real numbers instead of the route defaults
+        // (`context_window`/`max_tokens` are the spellings that reader accepts).
         writeJson(res, 200, {
           object: 'list',
           data: catalog.current().map(model => ({
@@ -221,6 +284,9 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
             object: 'model',
             created: 0,
             owned_by: 'workbuddy',
+            name: model.name,
+            context_window: model.contextWindow,
+            max_tokens: model.maxTokens,
           })),
         })
         return
@@ -244,15 +310,21 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       writeOpenAIError(res, 415, 'unsupported_media_type', 'Content-Type must be application/json')
       return
     }
-    // Session affinity: pi-ai forwards DSH's `sessionId` as `x-session-id`
-    // (configured in adapter.ts). The store pins that conversation to one
-    // account so a multi-turn exchange does not hop accounts mid-context.
-    // Also pass the opaque key to the tracking helper, which hashes it into
-    // upstream conversation/turn IDs. Never forward this raw local header.
+    // Session affinity. The header is honoured when a caller supplies one — an
+    // in-process caller still can, and it is the strongest signal available —
+    // but the published `llm-pi-ai` route cannot send it: pi-ai withholds
+    // `sendSessionAffinityHeaders` from the configuration surface, so no
+    // `x-session-id` arrives on this path. The body is therefore read *before*
+    // the account is chosen and the conversation is derived from it, which is
+    // what keeps one conversation on one account without that header.
+    //
+    // The key is also handed to the tracking helper, which hashes it into the
+    // upstream conversation/turn IDs. It is never forwarded upstream raw.
+    const raw = (await readBody(req)).toString('utf8')
     const affinityHeader = req.headers['x-session-id']
     const sessionKey = typeof affinityHeader === 'string' && affinityHeader !== ''
       ? affinityHeader
-      : undefined
+      : conversationKeyOfBody(raw)
 
     let credential
     try {
@@ -262,7 +334,6 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       return
     }
 
-    const raw = (await readBody(req)).toString('utf8')
     const prepared = prepareChatBody(raw)
 
     const controller = new AbortController()

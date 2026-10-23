@@ -31,12 +31,21 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
+import { randomBytes } from 'node:crypto'
 import type {} from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { createWorkBuddyAdapter } from './adapter.ts'
+import {
+  piAiSettingsNs,
+  publishProviderRoute,
+  storedRoute,
+  type PublishOutcome,
+} from './route-publisher.ts'
+import { directoryEntryOf, registerDirectory, type DirectoryEntry } from './provider-directory.ts'
+import { registerSignInFlow } from './authorization-flow.ts'
+import { routeApiKeyEnv } from './provider-config.ts'
 import { FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, WorkBuddyCatalog } from './catalog.ts'
-import { createWorkBuddyShim } from './shim.ts'
+import { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 import { createCredentialStore } from './store.ts'
 import { WorkBuddyUpstreamClient } from './upstream.ts'
 import { credentialFromLogin, displayNameOf, listCredentials, probePathFor, type WorkBuddyCredential } from './credentials.ts'
@@ -54,7 +63,7 @@ import { WorkBuddyProbeStore } from './probe-store.ts'
 import { WorkBuddyProbeService } from './probe-service.ts'
 import { createControlKey, registerWorkBuddyControlRoute } from './control-route.ts'
 import { registerWorkBuddyStatusRoute } from './web-status.ts'
-import { controlPathFor } from './status-paths.ts'
+import { controlPathFor, type WorkBuddyWebRoute } from './status-paths.ts'
 import { piAiVersionWarning } from './pi-ai-guard.ts'
 
 export { PLUGIN_VERSION } from './version.ts'
@@ -70,7 +79,6 @@ export { LoginClient, LoginPendingError, LoginExpiredError, parseRegionInput } f
 export { ALL_REGIONS, regionEndpoints, regionOfDomain, type WorkBuddyRegion } from './region.ts'
 export { createCredentialStore, chooseRotating, NotSignedInError } from './store.ts'
 export { COOLDOWN_STATE_FILENAME, readCooldowns, writeCooldown } from './cooldown-state.ts'
-export { createWorkBuddyAdapter } from './adapter.ts'
 export { createWorkBuddyShim } from './shim.ts'
 export { FALLBACK_WORKBUDDY_MODELS, FALLBACK_WORKBUDDY_AI_MODELS, WorkBuddyCatalog } from './catalog.ts'
 export type { WorkBuddyModelInfo } from './catalog.ts'
@@ -90,6 +98,7 @@ export {
   type WorkBuddyWebProbeModel,
   type WorkBuddyWebAccount,
   type WorkBuddyWebModel,
+  type WorkBuddyWebRoute,
   type WorkBuddyControlResult,
 } from './status-paths.ts'
 
@@ -131,6 +140,27 @@ export function providerIdFor(region: WorkBuddyRegion): string {
 
 /** Stream idle timeout, matching the ported client's expectations. */
 export const WORKBUDDY_STREAM_IDLE_TIMEOUT_MS = 300_000
+
+/**
+ * Loopback port each region's endpoint asks for.
+ *
+ * Fixed rather than ephemeral because the port is now part of a *published
+ * configuration value*: `providers[<route>].baseURL` names `http://127.0.0.1:<port>/v1`,
+ * and that value outlives the process that wrote it. An ephemeral port would
+ * make every restart leave the route pointing at a dead listener until something
+ * happened to republish it.
+ *
+ * Two distinct ports, because two listeners run in one process. The values are
+ * arbitrary but must stay stable across releases: changing one silently breaks
+ * every existing installation's configuration until the next publish, so a
+ * change here is a migration, not a tweak.
+ *
+ * A bind failure is reported without falling back or changing the saved endpoint.
+ */
+export const SHIM_PORT_FOR: Readonly<Record<WorkBuddyRegion, number>> = {
+  cn: 39271,
+  global: 39272,
+}
 
 /**
  * Whether *automatic* reasoning-effort probing is authorized.
@@ -198,12 +228,30 @@ interface RegionRuntime {
    */
   setAccount: (credential: WorkBuddyCredential | undefined) => void
   /**
-   * Rebuild the provider snapshot and tell the model picker to re-read.
+   * The bearer this region's loopback endpoint requires.
    *
-   * A no-op until {@link startRegion} has built the adapter, so a route that
-   * fires before registration cannot throw on an undefined callback.
+   * Minted once per region at construction rather than per listener start, so
+   * the value stored in the credential seam and the value the endpoint checks
+   * are the same one across a restart of the listener within this process. It
+   * is regenerated on every plugin load, and republished with the route then.
    */
-  invalidate: () => void
+  shimToken: string
+  /**
+   * The loopback origin this region's listener is answering on, once it is up.
+   *
+   * `undefined` before the listener starts; the published route's `baseURL` is
+   * derived from it, and the status document falls back to it when the stored
+   * configuration does not name one.
+   */
+  origin?: string
+  /**
+   * Publish this region's route into `llm-pi-ai`, or re-publish it after the
+   * catalog changed.
+   *
+   * A no-op until {@link startRegion} has an origin to publish, so a route that
+   * fires before the listener is up cannot write a `baseURL` naming no port.
+   */
+  publish: (mode?: 'seed' | 'sync') => Promise<PublishOutcome>
 }
 
 /**
@@ -271,8 +319,138 @@ function createRegionRuntime(
     setAccount: (credential) => {
       account = accountIdentityOf(credential)
     },
-    invalidate: () => {},
+    shimToken: randomBytes(32).toString('base64url'),
+    publish: async () => ({
+      published: false,
+      action: 'no-settings',
+      reason: 'the loopback endpoint is not listening yet',
+      modelCount: 0,
+    }),
   }
+}
+
+/**
+ * Describe one region's published route for the status document.
+ *
+ * Reads the *stored* configuration rather than what this plugin last wrote: the
+ * route belongs to `llm-pi-ai`, and the user can edit or delete it on the Models
+ * page without this plugin being told. Reporting the stored entry is therefore
+ * the only answer that stays true.
+ *
+ * @param ctx - the plugin context.
+ * @param runtime - the region being described.
+ * @returns the route facts the card renders; `configured` is false when the
+ *   route is absent or this composition has no settings service.
+ */
+function routeViewOf(ctx: Context, runtime: RegionRuntime): WorkBuddyWebRoute {
+  const providerId = providerIdFor(runtime.region)
+  const stored = storedRoute(ctx, providerId)
+  const entry = typeof stored === 'object' && stored !== null && !Array.isArray(stored)
+    ? stored as Record<string, unknown>
+    : undefined
+  const models = entry?.['models']
+  return {
+    providerId,
+    baseURL: typeof entry?.['baseURL'] === 'string'
+      ? entry['baseURL']
+      : runtime.origin === undefined ? '' : `${runtime.origin}/v1`,
+    apiKeyEnv: typeof entry?.['apiKeyEnv'] === 'string' ? entry['apiKeyEnv'] : routeApiKeyEnv(runtime.region),
+    configured: entry !== undefined,
+    modelCount: Array.isArray(models) ? models.length : 0,
+  }
+}
+
+/**
+ * Advertise one region's route as an OAuth provider in the Models page.
+ *
+ * Registration is all-or-nothing in the LLM service, and a provider already
+ * declared by another registration is a hard error — so both regions are
+ * registered together from one place, not one call per region. This function
+ * therefore only records the region's entry; the single registration happens in
+ * `apply` once both listeners hold their ports, because an entry's
+ * `defaultBaseURL` names the region's own endpoint.
+ *
+ * @param ctx - the plugin context carrying `ctx.llm`.
+ * @param runtime - the region to advertise.
+ * @param origin - the loopback origin this region is listening on.
+ */
+function directoryEntryFor(ctx: Context, runtime: RegionRuntime, origin: string): DirectoryEntry {
+  return directoryEntryOf({
+    region: runtime.region,
+    providerId: providerIdFor(runtime.region),
+    displayName: regionEndpoints(runtime.region).label,
+    shimOrigin: origin,
+    // The page's editor and this plugin's publish must address the same profile.
+    // Discovered from the live `llm-pi-ai` entry rather than guessed: a profile
+    // may mount that plugin under any id.
+    settingsNs: piAiSettingsNs(ctx) ?? 'llm-pi-ai',
+  })
+}
+
+/**
+ * Seed once at startup, or replace models after an explicit sync. Ordinary
+ * catalog, preference and account changes never rewrite the Models-page route.
+ *
+ * A rejected publish is logged rather than thrown: the caller is either a
+ * background refresh or a card action that reports its own failure, and neither
+ * benefits from an exception escaping into the poll interval.
+ *
+ * @param ctx - the plugin context.
+ * @param runtime - the region whose route should be refreshed.
+ * @param log - the plugin's log sink.
+ */
+async function republish(
+  ctx: Context,
+  runtime: RegionRuntime,
+  log: (message: string) => void,
+  mode: 'seed' | 'sync' = 'seed',
+): Promise<PublishOutcome> {
+  const outcome = await runtime.publish(mode)
+  const label = regionEndpoints(runtime.region).label
+  if (outcome.action === 'rejected') {
+    ctx.logger.warn(`dsh-workbuddy-oauth: ${label} 模型配置写入被拒绝（${outcome.reason ?? 'no reason'}）`)
+  } else if (outcome.action === 'written') {
+    log(`${label}：已写入 ${outcome.modelCount} 个模型到 DSH 模型配置。`)
+  }
+  return outcome
+}
+
+/**
+ * Publish one region's route from its current catalog.
+ *
+ * Reads the catalog *at publish time* rather than capturing a list: the roster
+ * is refreshed from the upstream on sign-in, on a manual refresh and on the
+ * first start, and a publish that carried a stale copy would silently undo the
+ * refresh it was meant to record.
+ *
+ * @param ctx - the plugin context.
+ * @param runtime - the region being published.
+ * @param origin - the shim origin the route's `baseURL` must name.
+ */
+async function publishRegion(
+  ctx: Context,
+  runtime: RegionRuntime,
+  origin: string,
+  mode: 'seed' | 'sync',
+  active: () => boolean,
+): Promise<PublishOutcome> {
+  const models = mode === 'seed' ? runtime.catalog.current() : runtime.catalog.roster().map(model => ({
+    ...model,
+    contextWindow: model.defaultContextWindow ?? model.contextWindow,
+  }))
+  return publishProviderRoute(ctx, {
+    providerId: providerIdFor(runtime.region),
+    region: runtime.region,
+    displayName: regionEndpoints(runtime.region).label,
+    shimOrigin: origin,
+    // Legacy selections apply only to the initial seed. Explicit sync means
+    // the complete upstream roster, with its default context windows.
+    models,
+    observe: (modelId) => runtime.probeService.recordFor(modelId),
+    token: runtime.shimToken,
+    mode,
+    active,
+  })
 }
 
 /**
@@ -374,29 +552,14 @@ export function apply(ctx: Context, config: Config): void {
    *
    * Loaded once at startup; the catalog's `setHiddenModels` is separate from the
    * roster (`set`), so a later catalog refresh cannot resurrect a hidden model.
-   * The read is fire-and-forget — until it lands, the catalog simply shows the
-   * full roster, which is the harmless default.
+   * Initial publication awaits both preferences, so the one-time migration
+   * cannot seed models that the user previously hid.
    */
-  void readHiddenModels().then((hidden) => {
+  const preferencesReady = Promise.all([readHiddenModels(), readUseMaximumContextWindow()]).then(([hidden, maximum]) => {
     for (const runtime of runtimes) {
       runtime.catalog.setHiddenModels(new Set(hidden[runtime.region]))
+      runtime.catalog.setUseMaximumContextWindow(maximum)
     }
-  })
-
-  /**
-   * Apply the persisted maximum-context-window preference to every catalog.
-   *
-   * One flag shared across both regions (only the international roster declares
-   * a larger window, so in practice only it changes); loaded once at startup,
-   * fire-and-forget like the hidden set.
-   */
-  void readUseMaximumContextWindow().then((useMaximum) => {
-    if (!useMaximum) return
-    let changed = false
-    for (const runtime of runtimes) {
-      if (runtime.catalog.setUseMaximumContextWindow(true)) changed = true
-    }
-    if (changed) ctx.emit('llm/adapters-updated')
   })
 
   /**
@@ -425,75 +588,54 @@ export function apply(ctx: Context, config: Config): void {
   const startRegion = async (runtime: RegionRuntime): Promise<void> => {
     const { region } = runtime
     const label = regionEndpoints(region).label
-    const shim = createWorkBuddyShim({
-      store: runtime.store,
-      client: runtime.client,
-      catalog: runtime.catalog,
-      logger: ctx.logger,
-    })
+
+    // A busy stable port is an error, never permission to rewrite the endpoint.
+    const startShim = async (port: number): Promise<WorkBuddyShim | undefined> => {
+      const candidate = createWorkBuddyShim({
+        store: runtime.store,
+        client: runtime.client,
+        catalog: runtime.catalog,
+        logger: ctx.logger,
+        port,
+        token: runtime.shimToken,
+      })
+      try {
+        await candidate.ready
+      } catch (error: unknown) {
+        void candidate.close()
+        ctx.logger.error(`dsh-workbuddy-oauth: ${label} 回环端点启动失败`, error)
+        return undefined
+      }
+      return candidate
+    }
+
+    const preferred = SHIM_PORT_FOR[region]
+    const shim = await startShim(preferred)
+    if (shim === undefined) return
+    if (stopped) { await shim.close(); return }
     shims.push(() => shim.close())
 
     try {
-      await shim.ready
-    } catch (error: unknown) {
-      ctx.logger.error(`dsh-workbuddy-oauth: ${label} 回环端点启动失败`, error)
-      return
-    }
-
-    try {
-      const result = createWorkBuddyAdapter({
-        // One provider id per region. The two upstreams offer overlapping model
-        // ids (both list `deepseek-v4.1-flash`), so a shared id would make
-        // `resolveModel` ambiguous and let a request resolve to a descriptor
-        // built for the other region's endpoint.
-        providerId: providerIdFor(region),
-        // The picker groups models under this name. It must stay visibly
-        // distinct from `dsh-workbuddy-connect`'s "WorkBuddy" / "WorkBuddy AI"
-        // groups — a user with both installed compares them side by side, and a
-        // collision-free name is the only thing that tells the groups apart.
-        displayName: regionEndpoints(region).label,
-        // Which endpoint this adapter serves. Only the CN `onlyReasoning`
-        // veto reads it (#87); the request-level `off` strip covers both.
-        region,
-        shim,
-        store: runtime.store,
-        catalog: runtime.catalog,
-        resolveAttachments: () => ctx.get('attachments'),
-        resolveImageAccess: (attachments, ref) =>
-          resolveImageAttachmentAccess(
-            attachments,
-            (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath),
-            ref,
-          ),
-        // The reasoning-level gap this plugin used to have: the upstream no
-        // longer declares `supportedEfforts` for most rows, so without a local
-        // observation those models get no level picker at all. This is the seam
-        // that supplies one from a user-authorized probe.
-        observe: (modelId) => runtime.probeService.recordFor(modelId),
-      })
-
-      const release = ctx.llm.registerAdapter([providerIdFor(region)], result.adapter)
-      // Routes and the settings card invalidate through this, so the adapter is
-      // rebuilt after a probe observation or a manual catalog refresh.
-      runtime.invalidate = () => {
-        result.invalidate()
-        ctx.emit('llm/adapters-updated')
-      }
-      try {
-        ctx.effect(() => () => {
-          release()
-          void shim.close()
-        })
-      } catch {
-        // `ctx.effect` throws once the context is disposed, so the disposer it
-        // would have registered never runs; release here instead.
-        release()
-        void shim.close()
-      }
-
-      const synced = await refreshCatalog(ctx, runtime, log, 'startup')
-      if (synced) result.invalidate()
-      ctx.emit('llm/adapters-updated')
+      const origin = shim.baseUrl()
+      runtime.origin = origin
+      runtime.publish = (mode = 'seed') => publishRegion(ctx, runtime, origin, mode, () => !stopped)
+      // The directory entry that makes the Models page render a sign-in button
+      // instead of an endpoint/API-key form is registered once for both regions
+      // after every listener is up (see `apply`): an entry's `defaultBaseURL`
+      // names the port this call has just obtained.
+      // The route is published rather than served by an adapter this plugin
+      // registers: from here on `llm-pi-ai` owns it, the Models page edits it,
+      // and the plugin's only remaining job is to answer on the endpoint.
+      //
+      // Published unconditionally, not only when the catalog changed: the bearer
+      // is regenerated on every plugin load, so a restart that skipped this
+      // would leave the stored credential naming the previous process's secret
+      // and every request failing `401` until something else triggered a write.
+      await preferencesReady
+      if (stopped) return
+      await refreshCatalog(ctx, runtime, log, 'startup')
+      if (stopped) return
+      await republish(ctx, runtime, log)
     } catch (error: unknown) {
       // Contained per region: one region failing must not take the other down.
       ctx.logger.error(`dsh-workbuddy-oauth: ${label} provider 注册失败`, error)
@@ -501,7 +643,28 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  for (const runtime of runtimes) void startRegion(runtime)
+  const startups = runtimes.map(runtime => startRegion(runtime))
+
+  /**
+   * Advertise both regions in the configurable-provider directory, once.
+   *
+   * After `startups`, not before: an entry's `defaultBaseURL` names the region's
+   * own loopback port, which only exists once its listener is up. One call for
+   * the whole set, because the LLM service registers all-or-nothing and treats a
+   * provider already declared by another registration as a hard error.
+   *
+   * The failure mode is contained inside `registerDirectory`: a refused set costs
+   * the OAuth presentation (the page falls back to the hand-declared form), not
+   * the routes themselves.
+   */
+  void Promise.all(startups).then(() => {
+    if (stopped) return
+    const entries = runtimes.flatMap(runtime => {
+      const origin = runtime.origin
+      return origin === undefined ? [] : [directoryEntryFor(ctx, runtime, origin)]
+    })
+    if (entries.length > 0) registerDirectory(ctx, entries)
+  })
 
   /**
    * Notice sign-ins that happen while DSH keeps running.
@@ -523,15 +686,15 @@ export function apply(ctx: Context, config: Config): void {
         .current()
         .then(async (credential) => {
           if (credential === undefined) {
-            // Signed out: hide the group if it is showing, and do not call out.
-            if (runtime.catalog.setVisible(false)) ctx.emit('llm/adapters-updated')
+            // Signed out: drop the route if it is published, so the picker stops
+            // offering models that can only answer `401`, and do not call out.
+            runtime.catalog.setVisible(false)
             return
           }
           // A credential appeared for a region that was hidden: this is the
           // sign-in case the interval exists for.
           if (!runtime.catalog.isVisible()) {
-            const changed = await refreshCatalog(ctx, runtime, log, 'login')
-            if (changed) ctx.emit('llm/adapters-updated')
+            await refreshCatalog(ctx, runtime, log, 'login')
           }
         })
         .catch((error: unknown) => {
@@ -562,10 +725,43 @@ export function apply(ctx: Context, config: Config): void {
     // and every surface reports it as disabled with no way to tell why.
     await forgetAccount(credential.uid)
     // Refresh immediately so the models are selectable without waiting for the
-    // periodic poll.
+    // periodic poll, then write the routes: a fresh sign-in usually changes the
+    // roster, and the picker reads the published route rather than this catalog.
     await Promise.all(runtimes.map((runtime) => refreshCatalog(ctx, runtime, log, 'login')))
-    ctx.emit('llm/adapters-updated')
     return { uid: credential.uid, label: displayNameOf(credential) }
+  }
+
+  /**
+   * Register the Models page sign-in for each region.
+   *
+   * The directory entry (see `provider-directory.ts`) is what makes the page
+   * show a sign-in button; this is the flow that button runs. It drives the same
+   * `begin`/`completeLogin` pair as `/wb-login` and the settings card, so all
+   * three surfaces sign in through one implementation — the failure this avoids
+   * is a Models page that reports success while the plugin's own store was never
+   * written.
+   *
+   * The flow deliberately commits no pi-ai credential record: accounts stay in
+   * this plugin's own per-file store so the rotating pool, per-account cooldown
+   * and session affinity keep working. `registerSignInFlow` documents why that
+   * is allowed by the seam.
+   */
+  const flowDisposers: Array<() => void> = []
+  for (const runtime of runtimes) {
+    const dispose = registerSignInFlow(
+      ctx,
+      providerIdFor(runtime.region),
+      runtime.region,
+      {
+        begin: async (region) => {
+          const request = await logins.begin(region)
+          return { url: request.url, state: request.state }
+        },
+        complete: completeLogin,
+        isPending: (error: unknown) => error instanceof LoginPendingError,
+      },
+    )
+    if (dispose !== undefined) flowDisposers.push(dispose)
   }
 
   /**
@@ -590,7 +786,8 @@ export function apply(ctx: Context, config: Config): void {
         runtimes.reduce((count, runtime) => count + (runtime.probeStore.forget(key) ? 1 : 0), 0),
     })
     await Promise.all(runtimes.map((runtime) => refreshCatalog(ctx, runtime, log, 'login')))
-    ctx.emit('llm/adapters-updated')
+    // A removed account can leave a region with no credential at all, in which
+    // case its catalog is now empty and the route must stop advertising it.
   }
 
   /**
@@ -639,6 +836,7 @@ export function apply(ctx: Context, config: Config): void {
           }),
         hiddenModels: () => runtime.catalog.hiddenModelIds(),
         useMaximumContextWindow: () => runtime.catalog.isUsingMaximumContextWindow(),
+        route: () => routeViewOf(ctx, runtime),
       })),
       controlKey,
     })
@@ -653,20 +851,32 @@ export function apply(ctx: Context, config: Config): void {
           // confirmation, so it carries one-request consent. This never changes
           // the automatic-probing policy.
           const result = await runtime.probeService.probe(modelId, true)
-          if (result.state === 'ok') runtime.invalidate()
           return result
         },
         clear: () => {
           runtime.probeStore.clear()
-          runtime.invalidate()
         },
         refresh: async () => {
           if (stopped) return { state: 'failed', reason: 'plugin is stopping' }
-          const changed = await refreshCatalog(ctx, runtime, log, 'login')
-          if (changed) runtime.invalidate()
+          await refreshCatalog(ctx, runtime, log, 'login')
           return runtime.catalog.isVisible()
             ? { state: 'refreshed', reason: `${runtime.catalog.current().length} models` }
             : { state: 'signed-out' }
+        },
+        /**
+         * Write this region's models into the `llm-pi-ai` route.
+         *
+         * This is the card's counterpart to "the model list is configuration
+         * now": the plugin cannot make a model appear in the picker by itself,
+         * because the route belongs to `llm-pi-ai`. The button exists so a user
+         * who just ticked a model does not have to restart DSH to see it.
+         */
+        syncProvider: async () => {
+          if (stopped) return { state: 'failed', reason: 'plugin is stopping' }
+          const outcome = await republish(ctx, runtime, log, 'sync')
+          return outcome.published
+            ? { state: 'ok', reason: `${outcome.action} · ${outcome.modelCount} models` }
+            : { state: 'failed', reason: outcome.reason ?? outcome.action }
         },
         /**
          * The card's sign-in flow.
@@ -728,8 +938,7 @@ export function apply(ctx: Context, config: Config): void {
           }
           await setAccountDisabled(uid, !enabled)
           await Promise.all(runtimes.map((runtime) => refreshCatalog(ctx, runtime, log, 'login')))
-          ctx.emit('llm/adapters-updated')
-          return { state: 'ok', reason: enabled ? 'enabled' : 'disabled' }
+                return { state: 'ok', reason: enabled ? 'enabled' : 'disabled' }
         },
         /**
          * The card's counterpart to hiding a model.
@@ -747,9 +956,11 @@ export function apply(ctx: Context, config: Config): void {
           const next = new Set(runtime.catalog.hiddenModelIds())
           if (visible) next.delete(modelId)
           else next.add(modelId)
-          const changed = runtime.catalog.setHiddenModels(next)
+          runtime.catalog.setHiddenModels(next)
           await setRegionHiddenModels(runtime.region, [...next])
-          if (changed) runtime.invalidate()
+          // Republished rather than merely invalidated: the tick now decides
+          // what the route advertises, so a change that is not written leaves
+          // the card and the picker disagreeing until the next restart.
           return { state: 'ok', reason: visible ? 'visible' : 'hidden' }
         },
         /**
@@ -761,11 +972,12 @@ export function apply(ctx: Context, config: Config): void {
          */
         setMaximumContextWindow: async (enabled) => {
           await writeUseMaximumContextWindow(enabled)
-          let changed = false
+          // The flag changes each model's published `contextWindow`, so every
+          // region's route is rewritten — a region whose flag did not move still
+          // carries the old window in its configuration.
           for (const region of runtimes) {
-            if (region.catalog.setUseMaximumContextWindow(enabled)) changed = true
+            region.catalog.setUseMaximumContextWindow(enabled)
           }
-          if (changed) ctx.emit('llm/adapters-updated')
           return { state: 'ok', reason: enabled ? 'maximum' : 'default' }
         },
         /**
@@ -788,11 +1000,13 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     stopped = true
     for (const timer of timers) clearInterval(timer)
     for (const dispose of commandDisposers) dispose()
-    for (const close of shims) void close()
+    for (const dispose of flowDisposers) dispose()
+    await Promise.all(startups)
+    await Promise.all(shims.map(close => close()))
   })
 
   log(`已加载 v${PLUGIN_VERSION}（自有 OAuth 登录，不读取桌面端）`)

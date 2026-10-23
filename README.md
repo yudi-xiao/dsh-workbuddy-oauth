@@ -5,11 +5,13 @@
 国内版与国际版各一套端点，**自己走 OAuth 设备码流程**——不读桌面 App 的凭据文件，所以不用装桌面 App，也不受它的安装位置、凭据加密格式与版本号影响。密码不经过本插件：授权在浏览器完成，插件只拿令牌。
 
 - **多账号**——同时登录多个，选号时自动跳过被限流的；某个账号额度耗尽**只停它一个**，其余照常服务。
-- **会话粘性**——同一个对话粘住同一个账号，不会中途换人；但**不粘坏账号**，下一条消息就换到健康的那个，上下文不丢。
+- **尽力保持账号粘性**——有显式会话标识时优先使用，否则从首条用户输入派生。相同首条输入可能共享粘性键，裁剪历史可能改变键；这不是严格的会话隔离。失效或冷却账号会在后续请求中重新选择。
 
-![license](https://img.shields.io/badge/license-MIT-blue.svg) ![tests](https://img.shields.io/badge/tests-325%20passing-brightgreen.svg) ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-green.svg)
+![license](https://img.shields.io/badge/license-MIT-blue.svg) ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-green.svg)
 
 > **本仓库的定位。** 这是 [molly-ovo/dsh-workbuddy-oauth](https://github.com/molly-ovo/dsh-workbuddy-oauth) 的本地维护分支，面向 **DSH Desktop 0.2.1-rc.2** 与 pi-ai **1.1.0** 这一代宿主。它保留上游的 OAuth 设备码登录、多账号与会话粘性实现，只做宿主兼容与协议对齐的改动，改动明细见 [LOCAL_COMPATIBILITY.md](./LOCAL_COMPATIBILITY.md)。
+
+> **版本边界：** 已公开提交为 `c6af050`；本地 `0.0.5-dsh021.1` 原生模型所有权重构尚未安装、尚未在线验证。下述原生模型管理说明针对本地新实现，不表示 GitHub 版本已具备。离线检查与历史结果见 [兼容记录](./LOCAL_COMPATIBILITY.md)。
 
 ---
 
@@ -37,7 +39,7 @@ dsh plugin --profile web add ./dsh-workbuddy-oauth
 
 ### 两种方式的共同点
 
-`dsh plugin` 会把参数转发给 pnpm 在 profile 目录里执行，成功后**自动对账 `dsh.profile.bundles`**——本插件声明了 `dsh.bundle.patch`，装上即接管模型目录，无需手改 profile 文件。`web` profile 首次使用时自动从模板初始化。
+`dsh plugin` 会把参数转发给 pnpm 在 profile 目录里执行，成功后**自动对账 `dsh.profile.bundles`**——本插件声明了 `dsh.bundle.patch`，用于挂载账号服务与 Client 卡片，不接管原生模型目录。`web` profile 首次使用时自动从模板初始化。
 
 **装完刷新浏览器**。模型 provider 目录在进程启动时组成；若模型没出现，重启 `dsh web`。
 
@@ -66,9 +68,17 @@ dsh plugin --profile web remove dsh-workbuddy-oauth
 | `/wb-account [enable\|disable] <uid 前缀>` | 启用 / 停用账号 |
 | `/wb-logout [uid 前缀]` | 退出登录（只删本插件保存的凭据，不动上游账号） |
 
-登录、状态、账号管理与积分查询也可在 **设置 → 插件 → DSH WorkBuddy OAuth** 卡片中完成。composer 输入区右侧另有一个探测控件，用于探测当前模型的推理档位。
+登录、状态、账号管理与积分查询也可在 **设置 → 插件 → DSH WorkBuddy OAuth** 卡片中完成。
 
-> 探测会向上游发出真实请求并消耗少量积分，因此有二次确认。
+### 模型管理（本地新实现）
+
+模型的唯一所有者是 DSH 原生 `llm-pi-ai.providers` 配置。请在 **DSH 设置 → 模型** 中添加、删除或编辑模型、上下文窗口及推理选项。
+
+插件的「模型」页只展示上游目录与原生路由状态；目录不是当前已配置的模型列表。刷新目录、登录和启动不会用目录覆盖已有的原生模型编辑。启动只为缺失的路由提供初始模型；已有路由的连接信息可更新，但模型列表保留。
+
+「导入上游目录（替换模型列表）」是显式重置操作：确认后会替换对应 provider 的整个模型列表，包括原生页面中的自定义条目、上下文和推理选项。需要保留的修改请先备份，不要把导入当作普通刷新。
+
+不再提供隐藏模型复选框、最大窗口开关或 composer 探测控件。旧探测数据不再决定原生模型目录或推理选项。
 
 ---
 
@@ -76,7 +86,7 @@ dsh plugin --profile web remove dsh-workbuddy-oauth
 
 ```
 DSH 模型选择器
-  └─ pi-ai adapter（注册 provider route）
+  └─ DSH 原生 llm-pi-ai.providers（模型配置与请求）
        └─ 回环端点  127.0.0.1，进程内，带一次性共享密钥
             └─ 上游  copilot.tencent.com / www.workbuddy.ai 等
 ```
@@ -181,7 +191,7 @@ pnpm 对本地目录默认以**链接**方式安装，所以构建完 profile �
 ## 已知限制
 
 - **依赖上游非公开接口。** WorkBuddy / CodeBuddy 更新后，本插件可能需要随之调整。
-- **推理档位需手动探测。** 上游未提供档位元数据，只能靠实际请求试出来；探测会消耗积分。
+- **推理能力以实际上游支持为准。** 在 DSH 原生模型配置中管理推理选项；插件不自动探测或把历史探测结论写回模型。
 - **国际版与国内版是两套账号体系**，额度互不通用，需分别登录。
 - **模型目录随上游变化**，本地缓存可能滞后。
 - **失败换号要等到下一次请求。** 某账号被限流或额度耗尽时，**当前这次请求仍会返回错误**；该账号被冷却后，**下一次请求**才会自动落到另一个可用账号上。
@@ -190,7 +200,7 @@ pnpm 对本地目录默认以**链接**方式安装，所以构建完 profile �
 
   同一个对话也不例外——会话粘性**不会**把你钉在坏账号上，下一条消息就会换到健康账号，上下文不丢（消息由 DSH 持有，不在账号上）。
 
-- **「最大上下文窗口」开关只影响国际版。** 国内版没有任何模型声明多档窗口，因此该开关只在国际版区块出现。
+- **上下文窗口由原生模型配置管理。** 上游目录中的窗口值仅供参考；不再提供插件级最大窗口开关。
 
 ---
 

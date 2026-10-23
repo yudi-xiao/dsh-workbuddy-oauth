@@ -313,6 +313,9 @@ const CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* An unticked row is still listed so it can be ticked again, but dimmed: it is
+   not among the models that will be published. */
+.wb-mname-off { opacity: 0.45; }
 .wb-ctx {
   flex: 0 0 auto;
   font-size: 12px;
@@ -330,6 +333,42 @@ const CSS = `
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
+}
+
+/* ============================================================
+   Published route — where the ticked models go
+   ============================================================ */
+/*
+ * One wrapping line: provider key, endpoint, stored state, model count, then the
+ * sync button. The monospace values are identifiers a user may need to compare
+ * against the Models page, so they are set in the same font as the account uid
+ * and truncate individually rather than widening the card.
+ */
+.wb-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.wb-route-key {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.wb-route-value {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ============================================================

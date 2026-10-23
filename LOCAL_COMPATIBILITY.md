@@ -54,3 +54,20 @@ All of the following ran in this repository's own checkout with
 - `pnpm typecheck` and `pnpm test` depend on the DSH `0.2.1-rc.2` type packages
   being installable; a host generation change means updating the peer/dev ranges
   before these checks mean anything again.
+
+
+## 本地原生模型所有权重构（0.0.5-dsh021.1）
+
+公开提交边界为 `c6af050`；本节描述其后的本地工作，不表示已发布或已安装验证。
+
+- DSH 原生 `llm-pi-ai.providers` 管理模型。插件只负责账号、回环连接和只读上游目录，不提供第二套模型编辑器。
+- 已有路由的模型列表不会因启动、登录或刷新目录自动替换；缺失路由可初始化模型。
+- 卡片保留显式 `sync-provider` 导入，并在发送前提示确认：它会替换对应 provider 的模型列表，覆盖用户的原生模型编辑。普通刷新不执行导入。
+- 移除隐藏模型复选框、最大上下文开关和 composer 探测注册。旧探测结果不再控制原生模型目录或推理档位。账号、积分和登录保留。
+- 请在 **DSH 设置 → 模型** 编辑模型、上下文窗口与推理选项。
+
+### 验证边界
+
+本次未安装插件、未登录、未发起真实聊天或导入请求；Client Slot 运行时读取超时，因此不声称在线 UI 验证。上面的 325 测试与离线加载结果仅属于历史版本，不能作为此次重构的验证结果。
+
+本次 Client 独立 TypeScript 检查通过。并行重构期间全套测试快照为 346 通过 / 3 失败：固定回环端口占用、登出后目录应为空的旧断言，以及国际版凭据引用的旧断言；尚不能宣称全套通过。完整 Host 类型检查也受并行接口改动影响，需集成后重新验证。

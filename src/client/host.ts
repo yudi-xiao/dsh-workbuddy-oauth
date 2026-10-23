@@ -61,9 +61,14 @@ export type ControlRequest =
   | { action: 'login-complete'; state: string }
   | { action: 'logout'; uid: string }
   | { action: 'set-account-enabled'; uid: string; enabled: boolean }
-  | { action: 'set-model-visible'; region: string; modelId: string; visible: boolean }
-  | { action: 'set-maximum-context-window'; enabled: boolean }
   | { action: 'refresh-credits'; uid: string }
+  /**
+   * Write the region's models into its `llm-pi-ai` provider route.
+   *
+   * Carries no payload: the host re-reads its own catalog, so the browser cannot
+   * ask for a model list the plugin does not actually serve.
+   */
+  | { action: 'sync-provider' }
 
 /**
  * POST one control action.

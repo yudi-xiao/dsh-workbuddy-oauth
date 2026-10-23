@@ -102,6 +102,25 @@ export interface WorkBuddyWebProbeModel {
   probedAt: number
 }
 
+/** One published `llm-pi-ai` route, as the card reports it. */
+export interface WorkBuddyWebRoute {
+  /** Provider key under `llm-pi-ai`'s `providers` dict, e.g. `workbuddy-oauth-ai`. */
+  providerId: string
+  /**
+   * Endpoint the published route points at, i.e. this region's loopback origin.
+   *
+   * Carried so the card can show the user what was written without reading the
+   * configuration itself — the card has no access to another plugin's settings.
+   */
+  baseURL: string
+  /** Credential reference the route names as its `apiKeyEnv`. */
+  apiKeyEnv: string
+  /** Whether a route for this provider exists in the `llm-pi-ai` configuration. */
+  configured: boolean
+  /** Models the published route currently carries; `0` when unconfigured. */
+  modelCount: number
+}
+
 /** One region's slice of the status document. */
 export interface WorkBuddyWebRegion {
   region: WorkBuddyRegion
@@ -123,6 +142,15 @@ export interface WorkBuddyWebRegion {
    * drift away from the card filtering for a group that does not exist.
    */
   providerId: string
+  /**
+   * The `llm-pi-ai` route this region publishes, and whether it is configured.
+   *
+   * The model list is configuration now rather than something this plugin
+   * serves directly, so the card has to be able to tell the user whether the
+   * route exists, where it points, and how many models it carries — none of
+   * which it can read from another plugin's settings on its own.
+   */
+  route: WorkBuddyWebRoute
   /**
    * Whether this region has a usable credential.
    *

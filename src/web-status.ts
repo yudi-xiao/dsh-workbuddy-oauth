@@ -29,6 +29,7 @@ import {
   type WorkBuddyWebModel,
   type WorkBuddyWebProbeModel,
   type WorkBuddyWebRegion,
+  type WorkBuddyWebRoute,
   type WorkBuddyWebStatus,
 } from './status-paths.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
@@ -79,6 +80,14 @@ export interface WorkBuddyRegionView {
    * flag on each read, exactly like {@link hiddenModels}.
    */
   useMaximumContextWindow: () => boolean
+  /**
+   * The `llm-pi-ai` route this region publishes, and whether it is configured.
+   *
+   * A function for the same reason as the other contributors: the route is
+   * written by a background publish and can be edited or deleted on the Models
+   * page, so a frozen value would report a state that may already be gone.
+   */
+  route: () => WorkBuddyWebRoute
 }
 
 /** Constructor dependencies for {@link workBuddyWebStatus}. */
@@ -135,6 +144,7 @@ function regionView(
     label: regionEndpoints(view.region).label,
     controlPath: controlPathFor(view.region),
     providerId: view.providerId,
+    route: view.route(),
     signedIn,
     models: modelViews(models),
     hiddenModels: [...view.hiddenModels()],

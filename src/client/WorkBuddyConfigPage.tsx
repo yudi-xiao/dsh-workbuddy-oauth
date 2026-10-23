@@ -33,7 +33,7 @@ import { readStatus, sendControl } from './host.ts'
 import { installStyles } from './styles.ts'
 import { creditSlot } from './credit-slot.ts'
 import type { WorkBuddyLocaleKey } from './locales.ts'
-import type { WorkBuddyWebAccount, WorkBuddyWebModel, WorkBuddyWebStatus } from '../status-paths.ts'
+import type { WorkBuddyWebAccount, WorkBuddyWebStatus } from '../status-paths.ts'
 import type { WorkBuddyCredits } from '../upstream.ts'
 
 /** Props the Plugins page delivers to the bundle's configuration entry. */
@@ -268,66 +268,29 @@ export function WorkBuddyConfigPage({ view, t }: WorkBuddyConfigPageProps): Reac
     await Promise.all(status.accounts.map(account => queryCredits(account.uid)))
   }
 
-  /**
-   * Hide or show one model.
-   *
-   * Posts to the region's own control path — the two regions share model ids, so
-   * a model toggle must land on the roster it was listed under.
-   */
-  const toggleModel = async (region: RegionView, modelId: string, visible: boolean): Promise<void> => {
-    if (status === undefined) return
-    setBusyKey(`model-${modelId}`)
+  /** Explicitly replace this region’s native model list after confirmation. */
+  const syncProvider = async (region: RegionView): Promise<void> => {
+    if (status === undefined || busy || busyKey !== undefined) return
+    setBusyKey(`sync-${region.region}`)
+    setNotice(undefined)
     try {
-      const result = await sendControl(region.controlPath, status.controlKey, {
-        action: 'set-model-visible',
-        region: region.region,
-        modelId,
-        visible,
-      })
+      const result = await sendControl(region.controlPath, status.controlKey, { action: 'sync-provider' })
       await refresh()
-      if (mounted.current && (result === undefined || result.state !== 'ok')) {
+      if (!mounted.current) return
+      if (result === undefined || result.state !== 'ok') {
         setNotice({
-          text: t('actionFailed', { action: t('hideModelFailed'), reason: result?.reason ?? t('working') }),
+          text: t('actionFailed', { action: t('syncProviderFailed'), reason: result?.reason ?? t('working') }),
           kind: 'err',
         })
+        return
       }
-    } finally {
-      if (mounted.current) setBusyKey(undefined)
-    }
-  }
-
-  /** Select or clear the maximum-context-window preference. */
-  const toggleMaxWindow = async (enabled: boolean): Promise<void> => {
-    if (status === undefined) return
-    setBusyKey('maxwindow')
-    try {
-      const result = await sendControl(status.regions[0]?.controlPath ?? '', status.controlKey, {
-        action: 'set-maximum-context-window',
-        enabled,
-      })
-      await refresh()
-      if (mounted.current && (result === undefined || result.state !== 'ok')) {
-        setNotice({
-          text: t('actionFailed', { action: t('maxWindowFailed'), reason: result?.reason ?? t('working') }),
-          kind: 'err',
-        })
-      }
+      setNotice({ text: t('syncProviderSucceeded', { reason: result.reason ?? '' }), kind: 'ok' })
     } finally {
       if (mounted.current) setBusyKey(undefined)
     }
   }
 
   if (view === 'summary') return t('intro')
-
-  const maxWindow = status?.regions[0]?.useMaximumContextWindow === true
-  /**
-   * How many models the maximum-window toggle actually changes, counted from the
-   * roster rather than assumed: a region whose models all declare one window is
-   * unaffected, and the hint must not promise a change that cannot happen.
-   */
-  const windowAffected = status === undefined
-    ? 0
-    : status.regions.reduce((sum, region) => sum + region.models.filter(model => model.multiWindow === true).length, 0)
 
   const tabButton = (id: Tab, label: string): ReactNode => (
     <button
@@ -508,12 +471,6 @@ export function WorkBuddyConfigPage({ view, t }: WorkBuddyConfigPageProps): Reac
             </div>
           ) : null}
 
-          {/*
-            One tab for both regions, each rendered as its own block. The
-            maximum-window switch stays on the region it can affect: only the
-            international roster declares supportedContextWindows, so on the
-            domestic block it would be a control that changes nothing.
-          */}
           {tab === 'models' ? (
             <div className="wb-panel">
               {status.regions.map(region => (
@@ -523,10 +480,7 @@ export function WorkBuddyConfigPage({ view, t }: WorkBuddyConfigPageProps): Reac
                   t={t}
                   busy={busy}
                   busyKey={busyKey}
-                  maxWindow={maxWindow}
-                  windowAffected={windowAffected}
-                  onToggleMaxWindow={toggleMaxWindow}
-                  onToggleModel={(modelId, visible) => toggleModel(region, modelId, visible)}
+                  onSyncProvider={() => syncProvider(region)}
                   onLogin={() => { void startLogin(region.region) }}
                 />
               ))}
@@ -698,92 +652,71 @@ function expiryOf(account: WorkBuddyWebAccount, t: WorkBuddyConfigPageProps['t']
   return { text: t('tokenRefreshesInDays', { days: Math.floor(hours / 24) }), warn: false }
 }
 
-/**
- * One region's block: its models, and the maximum-window switch where it applies.
- *
- * No collapse behaviour. Collapsing exists to make a long *list of accounts*
- * scannable; a model roster is exactly the content this tab is opened for, so
- * hiding parts of it would leave the tab with nothing to do.
- */
-function RegionBlock({ region, t, busy, busyKey, maxWindow, windowAffected, onToggleMaxWindow, onToggleModel, onLogin }: {
+/** Upstream catalog and native route status; only explicit import writes models. */
+function RegionBlock({ region, t, busy, busyKey, onSyncProvider, onLogin }: {
   region: RegionView
   t: WorkBuddyConfigPageProps['t']
   busy: boolean
   busyKey: string | undefined
-  maxWindow: boolean
-  windowAffected: number
-  onToggleMaxWindow: (enabled: boolean) => Promise<void>
-  onToggleModel: (modelId: string, visible: boolean) => void
+  onSyncProvider: () => Promise<void>
   onLogin: () => void
 }): ReactNode {
-  const hidden = new Set(region.hiddenModels)
-  const affects = region.models.filter(model => model.multiWindow === true).length
+  const [confirmingImport, setConfirmingImport] = useState(false)
+  const route = region.route
+  const importDisabled = busy || busyKey !== undefined || !region.signedIn || region.models.length === 0
   return (
     <div className="wb-panel">
       <div className="wb-region-head">
         <span className="wb-region-title">{region.label}</span>
         <span className={region.signedIn ? 'wb-ok' : 'wb-muted'}>
-          {region.signedIn
-            ? t('signedInWithModels', { count: region.models.length })
-            : t('signedOut')}
+          {region.signedIn ? t('signedInWithModels', { count: region.models.length }) : t('signedOut')}
         </span>
       </div>
-
-      {region.signedIn ? null : (
+      <p className="wb-hint">{t('modelsPublishIntro')}</p>
+      {!region.signedIn ? (
         <div className="wb-row">
           <span className="wb-note">{t('noAccountsInRegion')}</span>
           <button type="button" className={BTN} disabled={busy} onClick={onLogin}>
             {t('login')} · {region.region === 'cn' ? t('regionCn') : t('regionGlobal')}
           </button>
         </div>
-      )}
-
-      {/*
-        The switch renders only where it can do something, and there is no note
-        where it cannot. Only the international roster declares secondary
-        context windows, so a "this region has no such switch" line would appear
-        on exactly one block, every time — explaining the absence of a control
-        the user was never shown, on a tab whose purpose is the model list.
-      */}
-      {!region.signedIn || affects === 0 ? null : (
-        <label className="wb-maxrow">
-          <input
-            type="checkbox"
-            checked={maxWindow}
-            disabled={busyKey === 'maxwindow'}
-            onChange={() => { void onToggleMaxWindow(!maxWindow) }}
-          />
-          <span className="wb-label">{t('useMaximumContextWindow')}</span>
-          <span className="wb-spacer" />
-          <span className="wb-hint">
-            {maxWindow
-              ? t('maxWindowHintOn', { count: windowAffected })
-              : t('maxWindowHintOff', { count: windowAffected })}
-          </span>
-        </label>
-      )}
-
-      {region.signedIn && region.models.length > 0 ? (
-        <>
-          <div className="wb-grid">
-            {region.models.map(model => (
-              <label key={model.id} className="wb-mrow">
-                <input
-                  type="checkbox"
-                  checked={!hidden.has(model.id)}
-                  onChange={() => onToggleModel(model.id, hidden.has(model.id))}
-                />
-                <span className="wb-mname" style={hidden.has(model.id) ? { opacity: 0.45 } : undefined}>
-                  {model.name}
-                </span>
-                <span className={maxWindow && model.multiWindow === true ? 'wb-ctx wb-ctx-up' : 'wb-ctx'}>
-                  {formatContext(model.contextWindow)}
-                </span>
-              </label>
-            ))}
-          </div>
-        </>
       ) : null}
+      <div className="wb-route">
+        <span className="wb-route-key">{t('routeProvider')}</span>
+        <span className="wb-route-value" title={route.providerId}>{route.providerId}</span>
+        <span className="wb-route-key">{t('routeEndpoint')}</span>
+        <span className="wb-route-value" title={route.baseURL}>{route.baseURL}</span>
+        <span className={route.configured ? 'wb-ok' : 'wb-muted'}>
+          {route.configured ? t('routeConfigured') : t('routeUnconfigured')}
+        </span>
+        <span className="wb-muted">{t('routeModelCount', { count: route.modelCount })}</span>
+        <button type="button" className={BTN} disabled={importDisabled || confirmingImport}
+          data-busy={busyKey === `sync-${region.region}` ? '1' : undefined}
+          onClick={() => { setConfirmingImport(true) }}>
+          {t('syncProvider')}
+        </button>
+      </div>
+      {confirmingImport ? (
+        <div className="wb-note wb-note-warn" role="group" aria-label={t('syncProvider')}>
+          <p>{t('syncProviderConfirmBody', { provider: route.providerId })}</p>
+          <div className="wb-row">
+            <button type="button" className={BTN_DANGER} disabled={importDisabled}
+              onClick={() => { setConfirmingImport(false); void onSyncProvider() }}>
+              {t('syncProviderConfirmAction')}
+            </button>
+            <button type="button" className={BTN} onClick={() => { setConfirmingImport(false) }}>{t('cancel')}</button>
+          </div>
+        </div>
+      ) : null}
+      <span className="wb-label">{t('upstreamCatalog')}</span>
+      <div className="wb-grid">
+        {region.models.map(model => (
+          <div key={model.id} className="wb-mrow">
+            <span className="wb-mname" title={model.id}>{model.name} <small>{model.id}</small></span>
+            <span className="wb-ctx">{formatContext(model.contextWindow)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

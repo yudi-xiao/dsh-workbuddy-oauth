@@ -19,6 +19,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import { apply, inject, providerIdFor, WORKBUDDY_AI_PROVIDER, WORKBUDDY_PROVIDER } from '../src/index.ts'
 import { WORKBUDDY_AI_CONTROL_PATH, WORKBUDDY_CONTROL_PATH, WORKBUDDY_STATUS_PATH } from '../src/status-paths.ts'
 
+// Tests explicitly request ephemeral ports; production must never fall back.
+vi.mock('../src/shim.ts', async (original) => {
+  const actual = await original<typeof import('../src/shim.ts')>()
+  return { ...actual, createWorkBuddyShim: (options: Parameters<typeof actual.createWorkBuddyShim>[0]) => actual.createWorkBuddyShim({ ...options, port: 0 }) }
+})
+const cleanups: Array<() => void | Promise<void>> = []
 let home: string
 const savedHome = process.env['DSH_HOME']
 
@@ -28,6 +34,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map(close => close()))
   if (savedHome === undefined) delete process.env['DSH_HOME']
   else process.env['DSH_HOME'] = savedHome
   await rm(home, { recursive: true, force: true })
@@ -65,11 +72,42 @@ function fakeContext(): {
   effects: Array<() => void>
   routes: Route[]
   injected: string[]
+  /** Writes the plugin made through `settings.mutate`, in order. */
+  mutations: Array<{ ns: string; ops: unknown[] }>
+  /** Credential values stored through `credentials.set`, by reference. */
+  secrets: Map<string, string>
 } {
   const registrations: Registration[] = []
   const effects: Array<() => void> = []
   const routes: Route[] = []
   const injected: string[] = []
+  const mutations: Array<{ ns: string; ops: unknown[] }> = []
+  const secrets = new Map<string, string>()
+  /** Stand-in for the `llm-pi-ai` section a publish writes into. */
+  const providers: Record<string, unknown> = {}
+  const settings = {
+    describe: () => [{
+      ns: 'llm-pi-ai',
+      autoGenerate: true,
+      schema: {},
+      value: { providers },
+      revision: 1,
+      applies: 'live' as const,
+    }],
+    mutate: async (ns: string, ops: unknown[]) => {
+      mutations.push({ ns, ops })
+      for (const raw of ops as Array<{ op: string; path: string[]; value?: unknown }>) {
+        if (raw.op === 'set' && raw.path[0] === 'providers' && raw.path[1] !== undefined) {
+          providers[raw.path[1]] = raw.value
+        } else if (raw.op === 'unset' && raw.path[0] === 'providers' && raw.path[1] !== undefined) {
+          delete providers[raw.path[1]]
+        }
+      }
+    },
+  }
+  const credentials = {
+    set: async (ref: string, value: string) => { secrets.set(ref, value) },
+  }
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     llm: {
@@ -81,7 +119,14 @@ function fakeContext(): {
     commands: {
       register: () => () => {},
     },
-    get: () => undefined,
+    settings,
+    credentials,
+    get(name: string) {
+      if (name === 'configEditor') return { entries: () => [{ options: { name: '@deepseek-ai/dsh-llm-pi-ai', id: 'llm-pi-ai' } }] }
+      if (name === 'settings') return settings
+      if (name === 'credentials') return credentials
+      return undefined
+    },
     /**
      * Cordis' `inject` loads the callback once every named service is
      * available. The stub always satisfies the request (`webServer` exists) so
@@ -94,7 +139,9 @@ function fakeContext(): {
       return () => {}
     },
     effect(fn: () => () => void) {
-      effects.push(fn())
+      const cleanup = fn()
+      effects.push(cleanup)
+      cleanups.push(cleanup)
       return () => {}
     },
     emit: vi.fn(),
@@ -105,7 +152,7 @@ function fakeContext(): {
       },
     },
   } as unknown as Context
-  return { ctx, registrations, effects, routes, injected }
+  return { ctx, registrations, effects, routes, injected, mutations, secrets }
 }
 
 /** Let the async `startRegion` calls settle. */
@@ -143,25 +190,28 @@ describe('provider ids', () => {
 })
 
 describe('apply', () => {
-  it('registers both regions without throwing', async () => {
+  it('publishes both regions without throwing', async () => {
     // Regression: the shipped build threw here with
     // `workbuddy shim has no listening address`.
-    const { ctx, registrations } = fakeContext()
+    const { ctx } = fakeContext()
     expect(() => apply(ctx, { appVersion: '', cliVersion: '', region: 'cn' })).not.toThrow()
 
     await settle()
-    expect(registrations.map((entry) => entry.providerIds[0]).sort()).toEqual(
-      [WORKBUDDY_PROVIDER, WORKBUDDY_AI_PROVIDER].sort(),
-    )
+    // No credential is stored, so neither region has a catalog to publish: what
+    // matters is that assembly reached the end without throwing. The published
+    // route is asserted with a signed-in account below.
   })
 
-  it('registers each provider exactly once', async () => {
+  it('registers no adapter of its own', async () => {
+    // The whole point of the change: `llm-pi-ai` owns the route now. An adapter
+    // registered here would collide with the published route (`an adapter for
+    // provider "workbuddy-oauth-ai" is already registered`) and make the models
+    // silently unavailable.
     const { ctx, registrations } = fakeContext()
     apply(ctx, { appVersion: '', cliVersion: '', region: 'cn' })
     await settle()
 
-    const ids = registrations.map((entry) => entry.providerIds[0])
-    expect(new Set(ids).size).toBe(ids.length)
+    expect(registrations).toEqual([])
   })
 
   it('logs no error while starting', async () => {
@@ -174,15 +224,15 @@ describe('apply', () => {
     expect(error).not.toHaveBeenCalled()
   })
 
-  it('exposes a working provider for each region', async () => {
-    const { ctx, registrations } = fakeContext()
+  it('stores no route while signed out', async () => {
+    // A route published with no account behind it would advertise models whose
+    // first request answers 401 — worse than an absent route, which the Models
+    // page shows as "not configured".
+    const { ctx, mutations } = fakeContext()
     apply(ctx, { appVersion: '', cliVersion: '', region: 'cn' })
     await settle()
 
-    for (const registration of registrations) {
-      expect(registration.adapter).toBeDefined()
-      expect(registration.providerIds).toHaveLength(1)
-    }
+    expect(mutations).toEqual([])
   })
 
   it('mounts the status and control routes on a browser profile', async () => {

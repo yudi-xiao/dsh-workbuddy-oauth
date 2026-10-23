@@ -25,6 +25,13 @@ function regionView(region: 'cn' | 'global', models: readonly { id: string; name
     probeResults: () => [],
     hiddenModels: () => [],
     useMaximumContextWindow: () => false,
+    route: () => ({
+      providerId: region === 'global' ? 'workbuddy-oauth-ai' : 'workbuddy-oauth',
+      baseURL: 'http://127.0.0.1:39271/v1',
+      apiKeyEnv: 'WORKBUDDY_OAUTH_TOKEN',
+      configured: false,
+      modelCount: 0,
+    }),
   }
 }
 
