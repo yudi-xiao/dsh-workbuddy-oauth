@@ -11,7 +11,7 @@
 
 > **本仓库的定位。** 这是 [molly-ovo/dsh-workbuddy-oauth](https://github.com/molly-ovo/dsh-workbuddy-oauth) 的本地维护分支，面向 **DSH Desktop 0.2.1-rc.2** 与 pi-ai **1.1.0** 这一代宿主。它保留上游的 OAuth 设备码登录、多账号与会话粘性实现，只做宿主兼容与协议对齐的改动，改动明细见 [LOCAL_COMPATIBILITY.md](./LOCAL_COMPATIBILITY.md)。
 
-> **版本边界：** 已公开提交为 `c6af050`；本地 `0.0.5-dsh021.1` 原生模型所有权重构尚未安装、尚未在线验证。下述原生模型管理说明针对本地新实现，不表示 GitHub 版本已具备。离线检查与历史结果见 [兼容记录](./LOCAL_COMPATIBILITY.md)。
+> **版本边界：** 当前公开版本为 `0.0.5-dsh021.1`（原生模型所有权重构）。GitHub 安装路径已实测通过；模型页的 OAuth 呈现尚未在运行中的 DSH 里目视确认，详见 [兼容记录](./LOCAL_COMPATIBILITY.md)。
 
 ---
 
@@ -23,34 +23,43 @@
 
 ### 从 GitHub 安装（推荐）
 
+只需要仓库地址，不需要本地源码、不需要构建：
+
 ```sh
-dsh plugin --profile web add github:yudi-xiao/dsh-workbuddy-oauth
-dsh web
+dsh plugin --profile desktop add github:yudi-xiao/dsh-workbuddy-oauth
 ```
 
-**本仓库包含构建好的 `lib/`**，所以这一步不需要 `pnpm install`、也不需要构建，装完即可用。
+Desktop 版的 profile 叫 `desktop`；`web`、`headless` 等其它 profile 同理换成对应名字。也可以带分支或提交：`github:yudi-xiao/dsh-workbuddy-oauth#main`。
+
+也可以在 **设置 → 插件** 里添加同一个 `github:` 地址，效果相同。
+
+**本仓库包含构建好的 `lib/`**，所以安装不触发构建，装完即可用。
+
+### 这条命令做了什么（已实测）
+
+- profile 不存在时自动从模板初始化。
+- 通过 pnpm 从 GitHub 拉取 tarball 安装，lockfile 锁定到具体 **commit SHA**。
+- **自动对账 `dsh.profile.bundles`**——本插件声明了 `dsh.bundle.patch`，用于挂载账号服务与 Client 卡片，不接管原生模型目录。
+
+**装完重启 DSH**。插件行和模型 provider 目录都在进程启动时组成，刷新浏览器不足以加载 Host 半边。
+
+> **升级**：重新执行一次 `add` 即可。GitHub 形式的依赖在 lockfile 中锁定 SHA，**不会自动跟随新提交**；重新 `add` 才会重新解析到最新提交。
+
+> **注意**：包内 `pnpm add` 的告警如 `peer dependencies` 属正常（peer 由宿主提供）。若看到 `ERR_PNPM_IGNORED_BUILDS`，那是**安装方 profile** 的构建脚本策略问题，与本插件无关；Desktop 的 profile 模板已带 `allowBuilds`，正常不会出现。
 
 ### 从本地源码安装
 
 ```sh
 git clone https://github.com/yudi-xiao/dsh-workbuddy-oauth.git
-dsh plugin --profile web add ./dsh-workbuddy-oauth
+dsh plugin --profile desktop add ./dsh-workbuddy-oauth
 ```
 
-### 两种方式的共同点
-
-`dsh plugin` 会把参数转发给 pnpm 在 profile 目录里执行，成功后**自动对账 `dsh.profile.bundles`**——本插件声明了 `dsh.bundle.patch`，用于挂载账号服务与 Client 卡片，不接管原生模型目录。`web` profile 首次使用时自动从模板初始化。
-
-**装完刷新浏览器**。模型 provider 目录在进程启动时组成；若模型没出现，重启 `dsh web`。
-
-> **升级**：重新执行一次安装命令即可。GitHub 形式的依赖在 lockfile 中锁定 commit SHA，**不会自动跟随新提交**，需要重新 `add` 来重新解析。
-
-**确认已生效**——运行 `/wb-status` 应有输出。若没有：确认该 profile 的插件行 `enabled`、`llm-workbuddy-oauth` 已注册，并检查「插件」页是否能看到本条目。
+**确认已生效**——重启后运行 `/wb-status` 应有输出。若没有：确认该 profile 的插件行 `enabled`、`llm-workbuddy-oauth` 已注册，并检查「插件」页是否能看到本条目。
 
 **卸载**：
 
 ```sh
-dsh plugin --profile web remove dsh-workbuddy-oauth
+dsh plugin --profile desktop remove dsh-workbuddy-oauth
 ```
 
 账号凭据与插件状态都在 `$DSH_HOME/workbuddy-oauth/` 下，**卸载不会删除**；要彻底清理请手动删该目录（见[隐私](#隐私)）。
@@ -144,7 +153,7 @@ pnpm test                           # vitest，不触网
 pnpm build                          # 重新生成 lib/index.js 与 lib/client.js
 ```
 
-pnpm 对本地目录默认以**链接**方式安装，所以构建完 profile 会**即时**拿到新产物，无需重装。改完客户端半边刷新浏览器即可；改动宿主半边（`lib/index.js`）需要重启 `dsh web`。
+pnpm 对本地目录默认以**链接**方式安装，所以构建完 profile 会**即时**拿到新产物，无需重装。改完客户端半边刷新浏览器即可；改动宿主半边（`lib/index.js`）需要重启 DSH。
 
 > **提交产物就意味着要一起提交。** 改完 `src/` 请务必 `pnpm build` 并把 `lib/` 一并提交，否则仓库里的产物会落后于源码——而别人 clone 到的正是那份产物。
 

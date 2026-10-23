@@ -127,6 +127,33 @@ All of the following ran in this repository's own checkout with
   expected `name`/`inject`/`Config` exports and both provider ids
   (`workbuddy-oauth`, `workbuddy-oauth-ai`).
 
+### GitHub install
+
+Verified end to end, twice, against throwaway profiles:
+
+```
+dsh plugin --profile <name> add github:yudi-xiao/dsh-workbuddy-oauth
+```
+
+- A missing profile is initialized from the template first.
+- pnpm fetches the repository tarball; the lockfile pins the exact commit SHA
+  (`dsh-workbuddy-oauth@https://codeload.github.com/.../tar.gz/<sha>`).
+- `dsh.profile.bundles` is reconciled automatically, so the plugin row mounts
+  without a hand edit.
+- `dsh --profile <name> --dump-config` then shows the `llm-workbuddy-oauth` row.
+- `github:...#main` resolves the same way.
+- No build step runs: `lib/` is committed and shipped as-is.
+
+Two claims that turned out to be **false** during this work, recorded so they are
+not repeated:
+
+- A bare directory without the profile's `allowBuilds` reports
+  `ERR_PNPM_IGNORED_BUILDS` for `@google/genai` and `protobufjs` (pulled in by
+  pi-ai). That is a property of the *consuming* profile, not of this package.
+- Adding `pnpm.onlyBuiltDependencies` to this package's manifest does **not**
+  silence it: pnpm reads that field from the workspace root, not from a
+  dependency. Two commits built on that assumption were reverted.
+
 ### Live status
 
 An earlier 0.0.5 build was installed into the desktop profile and confirmed to
@@ -134,9 +161,14 @@ start: both listeners bind 39271/39272, the status route reports the new
 `route` field per region, and the international route was written into the
 profile's `llm-pi-ai.providers` with two models.
 
+The desktop profile has since been switched from the local tarball to
+`github:yudi-xiao/dsh-workbuddy-oauth` through the plugin manager
+(`application: applied`), and the installed package carries the directory-entry
+code.
+
 **The OAuth presentation has not been observed in a running DSH yet.** The
-directory registration and sign-in flow were added after that install, so these
-still need a restart to confirm:
+directory registration and sign-in flow were added after the running instance
+started, so these still need a restart to confirm:
 
 1. Settings → Models lists WorkBuddy with a sign-in button and no endpoint or
    API-key fields.
