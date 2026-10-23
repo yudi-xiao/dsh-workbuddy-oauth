@@ -50,7 +50,10 @@
     "oauth"
   ],
   "pnpm": {
-    "onlyBuiltDependencies": []
+    "onlyBuiltDependencies": [
+      "@google/genai",
+      "protobufjs"
+    ]
   },
   "dsh": {
     "bundle": {
