@@ -1,4 +1,6 @@
-/** Seed standard routes once; explicit sync alone replaces their models. */
+/** Legacy compatibility helpers. The active plugin only reads storedRoute;
+ * publishProviderRoute is retained for compatibility tests and is never invoked
+ * by startup, login, refresh, or the current manual provider operations. */
 import type { Context } from '@deepseek-ai/cordis'
 import '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'

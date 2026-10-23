@@ -6,6 +6,8 @@
 
 /** Dictionary keys this namespace owns. */
 export type WorkBuddyLocaleKey =
+  | 'manualIntro' | 'saveSelection' | 'removeProvider' | 'removeConfirm'
+  | 'manualLoginHint' | 'selectionCount' | 'selectionSaved' | 'selectionFailed'
   // Card chrome
   | 'title'
   | 'intro'
@@ -50,17 +52,12 @@ export type WorkBuddyLocaleKey =
   | 'logoutSucceeded'
   | 'enableSucceeded'
   | 'disableSucceeded'
-  // Models — publishing into the `llm-pi-ai` provider configuration
-  | 'modelsPublishIntro'
-  | 'upstreamCatalog'
-  | 'syncProviderConfirmBody'
-  | 'syncProviderConfirmAction'
+  // Models — explicit manual provider selection
   | 'routeProvider'
   | 'routeEndpoint'
   | 'routeConfigured'
   | 'routeUnconfigured'
   | 'routeModelCount'
-  | 'syncProvider'
   | 'syncProviderSucceeded'
   | 'syncProviderFailed'
   | 'useMaximumContextWindow'
@@ -102,6 +99,14 @@ export type WorkBuddyLocaleKey =
   | 'probeDismiss'
 
 export const zh: Record<WorkBuddyLocaleKey, string> = {
+  manualIntro: '仅保存你勾选的模型；登录、刷新和重启不会恢复已删除模型。请使用下方「保存所选模型」，无需填写通用 API 密钥或使用外层保存按钮。',
+  saveSelection: '保存所选模型',
+  removeProvider: '移除 WorkBuddy 注册',
+  removeConfirm: '再次点击确认移除注册（保留账号）',
+  manualLoginHint: '请先在「插件 → WorkBuddy → 配置」登录对应区域，再回来刷新。',
+  selectionCount: '已选 {count} 个模型（允许保存空列表）',
+  selectionSaved: '配置已保存。可关闭添加窗口；删除内容不会自动恢复。',
+  selectionFailed: '保存失败：{reason}',
   title: 'WorkBuddy',
   intro: '不依赖桌面 App 的 WorkBuddy 登录与状态。',
 
@@ -145,19 +150,14 @@ export const zh: Record<WorkBuddyLocaleKey, string> = {
   enableSucceeded: '已启用：{label}',
   disableSucceeded: '已停用：{label}',
   useMaximumContextWindow: '使用上游声明的最大上下文窗口',
-  maxWindowHintOn: '已开启：{count} 个模型改用最大窗口',
-  maxWindowHintOff: '关闭时：{count} 个模型使用较小窗口',
+  maxWindowHintOn: '目录中 {count} 个模型使用最大窗口；仅影响之后新添加的模型，不修改已保存模型。',
+  maxWindowHintOff: '目录中 {count} 个模型使用较小窗口；不修改已保存模型。',
 
-  modelsPublishIntro: '模型由 DSH 原生配置 llm-pi-ai.providers 管理。请前往 DSH 设置 → 模型，编辑模型、上下文窗口和推理选项。本页仅展示上游目录，不代表已配置模型；刷新目录不会覆盖原生配置。',
-  upstreamCatalog: '上游模型目录（只读）',
-  syncProviderConfirmBody: '将用当前上游目录替换 {provider} 的模型列表，覆盖你在 DSH 设置 → 模型中的模型编辑（包括自定义条目、上下文和推理选项）。确定导入？',
-  syncProviderConfirmAction: '确认替换模型列表',
   routeProvider: 'Provider',
   routeEndpoint: '端点',
   routeConfigured: '已写入 DSH 模型配置',
   routeUnconfigured: '尚未写入 DSH 模型配置',
   routeModelCount: '{count} 个模型',
-  syncProvider: '导入上游目录（替换模型列表）',
   syncProviderSucceeded: '已同步到模型配置：{reason}',
   syncProviderFailed: '同步到模型配置',
 
@@ -196,6 +196,14 @@ export const zh: Record<WorkBuddyLocaleKey, string> = {
 }
 
 export const en: Record<WorkBuddyLocaleKey, string> = {
+  manualIntro: 'Only checked models are saved. Login, refresh and restart never restore deleted models. Use Save selected models below, not the generic API-key field or outer Save button.',
+  saveSelection: 'Save selected models',
+  removeProvider: 'Remove WorkBuddy registration',
+  removeConfirm: 'Click again to remove registration (keep accounts)',
+  manualLoginHint: 'Sign in to this region in Plugins → WorkBuddy → Configure, then return and refresh.',
+  selectionCount: '{count} models selected (an empty list is allowed)',
+  selectionSaved: 'Configuration saved. You may close the Add dialog; deleted models will not be restored automatically.',
+  selectionFailed: 'Could not save: {reason}',
   title: 'WorkBuddy',
   intro: 'WorkBuddy sign-in and status without the desktop app.',
 
@@ -239,19 +247,14 @@ export const en: Record<WorkBuddyLocaleKey, string> = {
   enableSucceeded: 'Enabled: {label}',
   disableSucceeded: 'Disabled: {label}',
   useMaximumContextWindow: 'Use the largest declared context window',
-  maxWindowHintOn: 'On: {count} model(s) use the largest window',
-  maxWindowHintOff: 'Off: {count} model(s) use a smaller window',
+  maxWindowHintOn: 'Catalog: {count} model(s) use the largest window. Only newly added models use this setting; saved models stay unchanged.',
+  maxWindowHintOff: 'Catalog: {count} model(s) use a smaller window. Saved models stay unchanged.',
 
-  modelsPublishIntro: 'DSH owns models in llm-pi-ai.providers. Open DSH Settings → Models to edit models, context windows and reasoning options. This is the read-only upstream catalog, not the configured model list; refreshing it does not overwrite native settings.',
-  upstreamCatalog: 'Upstream catalog (read-only)',
-  syncProviderConfirmBody: 'Replace the model list for {provider} with the current upstream catalog? This overwrites model edits in DSH Settings → Models, including custom entries, context windows and reasoning options.',
-  syncProviderConfirmAction: 'Replace model list',
   routeProvider: 'Provider',
   routeEndpoint: 'Endpoint',
   routeConfigured: 'Written to the DSH model configuration',
   routeUnconfigured: 'Not written to the DSH model configuration yet',
   routeModelCount: '{count} model(s)',
-  syncProvider: 'Import catalog (replace model list)',
   syncProviderSucceeded: 'Synced to the model configuration: {reason}',
   syncProviderFailed: 'Syncing to the model configuration',
 

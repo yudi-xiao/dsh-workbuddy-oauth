@@ -49,7 +49,8 @@ export type WorkBuddyControlAction =
   | { action: 'set-model-visible'; region: string; modelId: string; visible: boolean }
   | { action: 'set-maximum-context-window'; enabled: boolean }
   | { action: 'refresh-credits'; uid: string }
-  | { action: 'sync-provider' }
+  | { action: 'sync-provider'; modelIds: string[] }
+  | { action: 'remove-provider' }
 
 /** Constructor dependencies. */
 export interface WorkBuddyControlRouteOptions {
@@ -122,7 +123,8 @@ export interface WorkBuddyControlRouteOptions {
    * button always publishes what the card is showing rather than a list the
    * browser sent.
    */
-  syncProvider?: () => Promise<WorkBuddyControlResult>
+  syncProvider?: (modelIds: string[]) => Promise<WorkBuddyControlResult>
+  removeProvider?: () => Promise<WorkBuddyControlResult>
   /** Route path to mount; defaults to {@link WORKBUDDY_CONTROL_PATH}. */
   path?: string
 }
@@ -176,7 +178,12 @@ function parseAction(text: string): WorkBuddyControlAction | undefined {
   if (action === 'refresh') return { action: 'refresh' }
   // No payload for this one either: the region is implied by the route, and the
   // host re-reads its own catalog rather than trusting a list from the browser.
-  if (action === 'sync-provider') return { action: 'sync-provider' }
+  if (action === 'remove-provider') return { action: 'remove-provider' }
+  if (action === 'sync-provider') {
+    const ids = wrapped['modelIds']
+    if (!Array.isArray(ids) || ids.length > 256 || ids.some(id => typeof id !== 'string' || !id.trim()) || new Set(ids).size !== ids.length) return undefined
+    return { action: 'sync-provider', modelIds: ids as string[] }
+  }
   if (action === 'probe') {
     const model = wrapped['model']
     if (typeof model !== 'string' || model.trim() === '') return undefined
@@ -332,12 +339,17 @@ export function workBuddyControlHandler(
         json(res, 200, await deps.refreshCredits(action.uid))
         return
       }
+      if (action.action === 'remove-provider') {
+        if (!deps.removeProvider) { json(res, 404, { error: 'provider-remove-not-supported' }); return }
+        json(res, 200, await deps.removeProvider())
+        return
+      }
       if (action.action === 'sync-provider') {
         if (deps.syncProvider === undefined) {
           json(res, 404, { error: 'provider-sync-not-supported' })
           return
         }
-        json(res, 200, await deps.syncProvider())
+        json(res, 200, await deps.syncProvider(action.modelIds))
         return
       }
       json(res, 200, await deps.probe(action.model))

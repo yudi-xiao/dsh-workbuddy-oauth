@@ -1,26 +1,9 @@
 /**
- * The retired in-plugin adapter, kept as a reference implementation.
- *
- * **Nothing on the request path uses this module any more.** WorkBuddy's routes
- * are now published into `llm-pi-ai` as ordinary provider configuration (see
- * `provider-config.ts` and `route-publisher.ts`), so `llm-pi-ai` owns the
- * adapter, the model directory and the Models page. Registering this one as well
- * would collide with the published route — `an adapter for provider
- * "workbuddy-oauth-ai" is already registered` — and make the models silently
- * unavailable, which is exactly why `index.ts` no longer calls it.
- *
- * It stays in the tree for two reasons, both about not losing information:
- *
- * 1. `reasoningFields()` encodes the effort-precedence rules the upstream data
- *    imposes, and `tests/adapter-reasoning.spec.ts` pins them. The published-route
- *    equivalent is `reasoningEffortsOf()` in `provider-config.ts`, and the two
- *    are kept deliberately parallel so a change in one is visibly a change in the
- *    other.
- * 2. `tests/cn-off-regression.spec.ts` drives the CN `off` veto end to end
- *    through a real `PiAiAdapter` and a stubbed `fetch`, which is the only place
- *    that wiring is exercised against pi-ai's own request serialization.
- *
- * Do not re-register it without deleting the corresponding published route.
+ * PiAiAdapter for manually configured WorkBuddy providers. The host registers
+ * it only when this plugin owns a saved provider profile; legacy llm-pi-ai
+ * routes suppress this registration to avoid duplicate provider ownership.
+ * Production model membership comes from saved snapshots, never catalog refresh.
+ * Reasoning and CN off-veto behavior share the established pi-ai regression tests.
  *
  * @module dsh-workbuddy-oauth/adapter
  */
@@ -189,6 +172,8 @@ export interface WorkBuddyAdapterOptions {
   shim: WorkBuddyShim
   store: WorkBuddyCredentialStore
   catalog: WorkBuddyCatalog
+  /** Persisted explicit selection; never infer it from a refreshed roster. */
+  models?: () => readonly WorkBuddyModelInfo[]
   /** Resolve the durable attachment service at request time, when present. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Resolve one image's path in the current model-tool execution world. */
@@ -374,7 +359,7 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL,
     // so the shim's routes line up with the `/v1` prefix in place.
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => toPiModel(info, baseUrl, observe?.(info.id), providerId, region))
+    return (options.models?.() ?? catalog.current()).map(info => toPiModel(info, baseUrl, observe?.(info.id), providerId, region))
   }
 
   const base = createProvider({

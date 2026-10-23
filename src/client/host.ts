@@ -62,13 +62,9 @@ export type ControlRequest =
   | { action: 'logout'; uid: string }
   | { action: 'set-account-enabled'; uid: string; enabled: boolean }
   | { action: 'refresh-credits'; uid: string }
-  /**
-   * Write the region's models into its `llm-pi-ai` provider route.
-   *
-   * Carries no payload: the host re-reads its own catalog, so the browser cannot
-   * ask for a model list the plugin does not actually serve.
-   */
-  | { action: 'sync-provider' }
+  /** Persist only the explicitly selected catalog models. */
+  | { action: 'sync-provider'; modelIds: string[] }
+  | { action: 'remove-provider' }
 
 /**
  * POST one control action.

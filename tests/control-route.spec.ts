@@ -57,6 +57,32 @@ const baseDeps = {
 }
 
 describe('control route guards', () => {
+  it('requires explicit valid model selections and forwards an empty selection unchanged', async () => {
+    const syncProvider = vi.fn(async (_ids: string[]) => ({ state: 'ok' }))
+    const key = createControlKey()
+    for (const modelIds of [undefined, 'all', ['x', 'x'], [''], Array.from({ length: 257 }, (_, n) => String(n))]) {
+      const result = await dispatch({ ...baseDeps, syncProvider }, key, { body: JSON.stringify({ action: 'sync-provider', modelIds }) })
+      expect(result.status).toBe(400)
+    }
+    expect(syncProvider).not.toHaveBeenCalled()
+    for (const modelIds of [[], ['selected']]) {
+      const result = await dispatch({ ...baseDeps, syncProvider }, key, { body: JSON.stringify({ action: 'sync-provider', modelIds }) })
+      expect(result.status).toBe(200)
+      expect(syncProvider).toHaveBeenLastCalledWith(modelIds)
+    }
+  })
+
+  it('protects provider deletion with the same loopback/control-key checks', async () => {
+    const removeProvider = vi.fn(async () => ({ state: 'ok' }))
+    const key = createControlKey()
+    const body = JSON.stringify({ action: 'remove-provider' })
+    expect((await dispatch({ ...baseDeps, removeProvider }, key, { body, controlKey: null })).status).toBe(403)
+    expect((await dispatch({ ...baseDeps, removeProvider }, key, { body, origin: 'https://evil.example' })).status).toBe(403)
+    expect(removeProvider).not.toHaveBeenCalled()
+    expect((await dispatch({ ...baseDeps, removeProvider }, key, { body })).status).toBe(200)
+    expect(removeProvider).toHaveBeenCalledOnce()
+  })
+
   it('rejects a non-POST method', async () => {
     const result = await dispatch(baseDeps, createControlKey(), { method: 'GET' })
     expect(result.status).toBe(405)

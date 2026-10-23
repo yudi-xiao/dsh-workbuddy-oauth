@@ -104,6 +104,8 @@ export interface WorkBuddyWebProbeModel {
 
 /** One published `llm-pi-ai` route, as the card reports it. */
 export interface WorkBuddyWebRoute {
+  settingsNs?: string
+  selectedModelIds?: readonly string[]
   /** Provider key under `llm-pi-ai`'s `providers` dict, e.g. `workbuddy-oauth-ai`. */
   providerId: string
   /**

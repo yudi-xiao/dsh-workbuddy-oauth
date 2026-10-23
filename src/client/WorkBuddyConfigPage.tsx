@@ -32,6 +32,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { readStatus, sendControl } from './host.ts'
 import { installStyles } from './styles.ts'
 import { creditSlot } from './credit-slot.ts'
+import { ModelSelection } from './ModelSelection.tsx'
 import type { WorkBuddyLocaleKey } from './locales.ts'
 import type { WorkBuddyWebAccount, WorkBuddyWebStatus } from '../status-paths.ts'
 import type { WorkBuddyCredits } from '../upstream.ts'
@@ -268,13 +269,13 @@ export function WorkBuddyConfigPage({ view, t }: WorkBuddyConfigPageProps): Reac
     await Promise.all(status.accounts.map(account => queryCredits(account.uid)))
   }
 
-  /** Explicitly replace this region’s native model list after confirmation. */
-  const syncProvider = async (region: RegionView): Promise<void> => {
+  /** Persist only the user's explicit model selection, including an empty list. */
+  const syncProvider = async (region: RegionView, modelIds: string[]): Promise<void> => {
     if (status === undefined || busy || busyKey !== undefined) return
     setBusyKey(`sync-${region.region}`)
     setNotice(undefined)
     try {
-      const result = await sendControl(region.controlPath, status.controlKey, { action: 'sync-provider' })
+      const result = await sendControl(region.controlPath, status.controlKey, { action: 'sync-provider', modelIds })
       await refresh()
       if (!mounted.current) return
       if (result === undefined || result.state !== 'ok') {
@@ -480,7 +481,7 @@ export function WorkBuddyConfigPage({ view, t }: WorkBuddyConfigPageProps): Reac
                   t={t}
                   busy={busy}
                   busyKey={busyKey}
-                  onSyncProvider={() => syncProvider(region)}
+                  onSyncProvider={modelIds => syncProvider(region, modelIds)}
                   onLogin={() => { void startLogin(region.region) }}
                 />
               ))}
@@ -658,12 +659,10 @@ function RegionBlock({ region, t, busy, busyKey, onSyncProvider, onLogin }: {
   t: WorkBuddyConfigPageProps['t']
   busy: boolean
   busyKey: string | undefined
-  onSyncProvider: () => Promise<void>
+  onSyncProvider: (modelIds: string[]) => Promise<void>
   onLogin: () => void
 }): ReactNode {
-  const [confirmingImport, setConfirmingImport] = useState(false)
   const route = region.route
-  const importDisabled = busy || busyKey !== undefined || !region.signedIn || region.models.length === 0
   return (
     <div className="wb-panel">
       <div className="wb-region-head">
@@ -672,7 +671,7 @@ function RegionBlock({ region, t, busy, busyKey, onSyncProvider, onLogin }: {
           {region.signedIn ? t('signedInWithModels', { count: region.models.length }) : t('signedOut')}
         </span>
       </div>
-      <p className="wb-hint">{t('modelsPublishIntro')}</p>
+
       {!region.signedIn ? (
         <div className="wb-row">
           <span className="wb-note">{t('noAccountsInRegion')}</span>
@@ -690,33 +689,8 @@ function RegionBlock({ region, t, busy, busyKey, onSyncProvider, onLogin }: {
           {route.configured ? t('routeConfigured') : t('routeUnconfigured')}
         </span>
         <span className="wb-muted">{t('routeModelCount', { count: route.modelCount })}</span>
-        <button type="button" className={BTN} disabled={importDisabled || confirmingImport}
-          data-busy={busyKey === `sync-${region.region}` ? '1' : undefined}
-          onClick={() => { setConfirmingImport(true) }}>
-          {t('syncProvider')}
-        </button>
       </div>
-      {confirmingImport ? (
-        <div className="wb-note wb-note-warn" role="group" aria-label={t('syncProvider')}>
-          <p>{t('syncProviderConfirmBody', { provider: route.providerId })}</p>
-          <div className="wb-row">
-            <button type="button" className={BTN_DANGER} disabled={importDisabled}
-              onClick={() => { setConfirmingImport(false); void onSyncProvider() }}>
-              {t('syncProviderConfirmAction')}
-            </button>
-            <button type="button" className={BTN} onClick={() => { setConfirmingImport(false) }}>{t('cancel')}</button>
-          </div>
-        </div>
-      ) : null}
-      <span className="wb-label">{t('upstreamCatalog')}</span>
-      <div className="wb-grid">
-        {region.models.map(model => (
-          <div key={model.id} className="wb-mrow">
-            <span className="wb-mname" title={model.id}>{model.name} <small>{model.id}</small></span>
-            <span className="wb-ctx">{formatContext(model.contextWindow)}</span>
-          </div>
-        ))}
-      </div>
+      <ModelSelection region={region} busy={busy || busyKey !== undefined} t={t} onSave={onSyncProvider} />
     </div>
   )
 }

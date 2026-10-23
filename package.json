@@ -2,7 +2,7 @@
   "name": "dsh-workbuddy-oauth",
   "displayName": "DSH WorkBuddy OAuth",
   "description": "把 WorkBuddy 模型接入 DeepSeek Harness —— 不依赖桌面 App，走 OAuth 设备码登录。",
-  "version": "0.0.5-dsh021.2",
+  "version": "0.0.5-dsh021.3",
   "private": true,
   "type": "module",
   "engines": {
@@ -21,12 +21,16 @@
       "default": "./lib/index.js"
     },
     "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
     "README.md",
     "LOCAL_COMPATIBILITY.md",
     "LICENSE"
@@ -61,6 +65,7 @@
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-model-selection",
         "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-settings-models",
         "@deepseek-ai/dsh-client-locale"
       ],
       "platform": "web"
@@ -90,6 +95,7 @@
     "@deepseek-ai/dsh-client-ui-model-selection": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings-models": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
     "@deepseek-ai/dsh-commands": "0.2.1-rc.2",
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.2",

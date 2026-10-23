@@ -1,6 +1,7 @@
 import z from "@deepseek-ai/schemastery";
+import "@deepseek-ai/dsh-settings";
 import { IncomingMessage, ServerResponse } from "node:http";
-import { Context } from "@deepseek-ai/cordis";
+import { Context, Volatile } from "@deepseek-ai/cordis";
 //#region src/region.d.ts
 /**
  * Region (realm) definitions for the two WorkBuddy deployments.
@@ -61,6 +62,27 @@ declare function regionEndpoints(region: WorkBuddyRegion): RegionEndpoints;
 declare function regionOfDomain(domain: string): WorkBuddyRegion;
 /** Both regions, for iteration in status output. */
 declare const ALL_REGIONS: readonly WorkBuddyRegion[];
+//#endregion
+//#region src/identity.d.ts
+/** The identity a chat request presents as. */
+interface ChatIdentity {
+  /** Desktop-app version; drives the desktop User-Agent and `X-IDE-Version`. */
+  clientVersion: string;
+  /** Bundled agent-CLI version; absent drops the `CLI/…` token. */
+  cliVersion?: string;
+}
+/** The identity a catalog request presents as. */
+interface AppVersionInfo {
+  version: string;
+  source: 'config' | 'fallback';
+}
+/** Where the identity values come from. Every field is optional. */
+interface IdentityConfig {
+  /** Desktop-app version to claim. */
+  appVersion?: string;
+  /** CLI version to claim; omit to drop the `CLI/…` token. */
+  cliVersion?: string;
+}
 //#endregion
 //#region src/oauth.d.ts
 /** Authorization has not completed yet — retryable, not a fault. */
@@ -240,267 +262,6 @@ declare function maskPhoneNumbers(text: string): string;
  * command, the settings card, and the status document.
  */
 declare function displayNameOf(credential: WorkBuddyCredential): string;
-//#endregion
-//#region src/version.d.ts
-/**
- * Build-time injected plugin version.
- *
- * `tsdown.config.ts` defines `__DSH_WORKBUDDY_OAUTH_VERSION__` from
- * package.json. The declare + fallback keeps `tsc --noEmit` and vitest working
- * on source that has not been through the bundler.
- *
- * @module dsh-workbuddy-oauth/version
- */
-/** Version of this plugin, as published in package.json. */
-declare const PLUGIN_VERSION: string;
-//#endregion
-//#region src/fingerprint.d.ts
-/**
- * Stable device fingerprint derivation.
- *
- * ## Why this exists
- *
- * The upstream treats requests as coming from a physical device. A client that
- * invents a fresh machine id per process, or that sends none at all, looks like
- * a new device every launch — the pattern upstream risk control is built to
- * flag, and the one that gets multi-account setups correlated and blocked.
- *
- * The fix every mature project in this space converged on is the same:
- * **derive the id deterministically from the account uid**, so each account
- * always presents as one fixed device and different accounts present as
- * different devices. Same uid plus same purpose yields the same id forever,
- * across restarts and machines.
- *
- * ## Provenance
- *
- * The scheme (`md5("<salt>:<uid>")` truncated to 36 hex chars, with distinct
- * salts per purpose) matches the reference implementations this plugin is
- * modelled on — `workbuddy2api`'s `derive_id`, as carried by
- * `ardeyouxipianyi/workbuddy2api-hub` and rebuilt for Rust in
- * `NextAgentX/trae-workbuddy-switch`. Reusing the established derivation is
- * deliberate: it is what upstream has been serving without issue.
- *
- * ## Scope: fingerprints are NOT for the login flow
- *
- * Checked against all three reference implementations: the OAuth calls
- * (`auth/state`, `auth/token`, `login/account`) carry **only** the CLI user
- * agent and the region's `Origin`/`Referer`. No `X-Machine-ID`, no
- * `X-Session-ID`. Device headers appear on chat, billing and task endpoints.
- *
- * So this module is applied to outbound API calls and *not* to sign-in, which
- * also keeps a sign-in from being tied to a device identity it does not need.
- *
- * @module dsh-workbuddy-oauth/fingerprint
- */
-/**
- * Derive a stable identifier for one account and purpose.
- *
- * The uid is required: without one there is no stable basis, and returning a
- * constant would make every account share a device. Callers must therefore
- * skip the header entirely when the uid is empty, which is why this returns
- * `undefined` rather than a placeholder.
- *
- * @param purpose - What the id is for; `machine` and `session` are sent
- *   upstream. Distinct purposes must not collide, so the value is part of the
- *   hash input.
- * @param uid - The account's uid from the OAuth account endpoint.
- * @returns Hex characters of {@link DERIVED_ID_HEX_LENGTH}, or `undefined` when
- *   there is no uid.
- */
-declare function deriveId(purpose: string, uid: string): string | undefined;
-/** The two device headers the upstream expects, for one account. */
-interface DeviceHeaders {
-  'X-Machine-ID': string;
-  'X-Session-ID': string;
-}
-/**
- * Build the device identity headers for one account.
- *
- * @returns The headers, or an empty object when `uid` is empty — sending a
- *   blank header is worse than sending none, because upstream would record a
- *   device with no identity.
- */
-declare function deviceHeaders(uid: string): DeviceHeaders | Record<string, never>;
-/**
- * A request id carrying a stable per-account prefix plus a unique suffix.
- *
- * @param uid - Account uid; an empty uid yields a shared `anonymous` prefix,
- *   which is acceptable here because the id still has to be unique per call.
- * @param now - Current epoch milliseconds, injectable for tests.
- */
-declare function requestId(uid: string, now?: number): string;
-//#endregion
-//#region src/refresh.d.ts
-/** Outcome of a refresh attempt. */
-type RefreshOutcome = {
-  status: 'refreshed';
-  credential: WorkBuddyCredential;
-} | {
-  status: 'not-needed';
-  credential: WorkBuddyCredential;
-} | {
-  status: 'failed';
-  reason: string;
-};
-/** Injectable collaborators, so the logic is testable without a network. */
-interface RefreshDeps {
-  fetchImpl?: typeof fetch;
-  now?: () => number;
-  timeoutMs?: number;
-}
-/**
- * Refresh one account's token if needed.
- *
- * Concurrent calls for the same uid share one request, and the cycle is
- * serialized under the credential file lock so a second process re-reads the
- * committed token instead of replaying a spent refresh token.
- *
- * @param uid - Account to refresh; its stored credential is the input.
- * @param deps - Optional fetch/clock overrides.
- */
-declare function refreshCredential(uid: string, deps?: RefreshDeps): Promise<RefreshOutcome>;
-//#endregion
-//#region src/store.d.ts
-/** Thrown when no usable credential exists; the shim maps this to HTTP 401. */
-declare class NotSignedInError extends Error {
-  constructor(message?: string);
-}
-/** What the ported code needs from a credential store. */
-interface CredentialStore {
-  /**
-   * Resolve the credential to serve the next request; refreshes if needed.
-   *
-   * @param sessionKey - optional conversation identity. When given, and an
-   *   account is already pinned to it and still selectable, that account wins —
-   *   so one conversation keeps one account instead of hopping mid-turn.
-   */
-  resolve(sessionKey?: string): Promise<WorkBuddyCredential>;
-  /** The current credential without refreshing, or `undefined` when none. */
-  current(): Promise<WorkBuddyCredential | undefined>;
-  /**
-   * Mark one account as failed, cooling it out of selection until `untilMs`.
-   *
-   * The store does not decide *how long* a failure cools an account — it only
-   * records the deadline, so it needs no knowledge of the upstream's error
-   * vocabulary. The shim (which already classifies upstream failures) computes
-   * the deadline and hands it over.
-   */
-  noteFailure(uid: string, untilMs: number): void;
-}
-/**
- * Rotating selection: pick the next ready account in ring order.
- *
- * The single-account rule is stable here because a one-account pool always
- * answers that account; rotation only becomes visible with two or more. Order
- * of preference within one call:
- *
- * 1. unexpired token: choosing an expired one would spend a refresh cycle (and
- *    a rotation) on a request that another account could serve as-is;
- * 2. not currently cooled out (a recently failed account stays parked);
- * 3. ring order from `cursor`, so load spreads instead of always hitting the
- *    lexicographically-first account.
- *
- * When *every* account is cooled out, the soonest-to-recover account is served
- * anyway — refusing would leave the whole pool unusable until a timer fires,
- * and for a personal install a short wait on the least-bad account is better
- * than a hard failure.
- *
- * Pure, and exported so the rule is testable without touching the filesystem.
- * `credentials` are already filtered to one region by the caller: a credential
- * is only ever valid for its own upstream host, so presenting a domestic token
- * to the international service (or vice versa) is an authentication failure,
- * and the caller knows which endpoint it is about to call.
- *
- * @returns the chosen credential and the next cursor, or `undefined` when none.
- */
-declare function chooseRotating(credentials: readonly WorkBuddyCredential[], cursor: number, cooldownUntilMs: ReadonlyMap<string, number>, now?: number): {
-  credential: WorkBuddyCredential;
-  nextCursor: number;
-} | undefined;
-/** Options for {@link createCredentialStore}. */
-interface CredentialStoreOptions {
-  /**
-   * Region this store serves.
-   *
-   * Each region gets its own store because a credential is only valid against
-   * its own upstream host. Without this filter a domestic and an international
-   * account would be interchangeable to a store, and the shim would present the
-   * wrong region's token.
-   */
-  region?: WorkBuddyRegion;
-  /** Clock, injectable for tests. */
-  now?: () => number;
-  /** Refresh hook, injectable for tests. Defaults to {@link refreshCredential}. */
-  refresh?: typeof refreshCredential;
-}
-/**
- * Build the credential store the ported shim and adapter consume.
- *
- * `resolve()` refreshes when the chosen token is at or near expiry, and
- * reports {@link NotSignedInError} when nothing is stored — the shim turns that
- * into a 401 carrying the message, so an unconfigured install reports "sign in"
- * rather than an opaque failure.
- */
-declare function createCredentialStore(options?: CredentialStoreOptions): CredentialStore;
-//#endregion
-//#region src/cooldown-state.d.ts
-/**
- * Persisted failure cooldowns.
- *
- * The cooldown map (`uid → cool-until epoch ms`) lives in memory while the
- * process runs. This module adds a write-through disk copy so a DSH restart does
- * not resurrect a cooled account: an account that exhausted its credit an hour
- * ago must not be retried on the next start, because the failure it would hit is
- * exactly the one the cooldown exists to avoid.
- *
- * Deliberately **not** persisted: the rotation cursor (restarting from account
- * one is harmless) and session affinity (a 30-minute TTL that a restart exceeds
- * anyway — conversations do not survive a host restart).
- *
- * The file is read when the store is built and on every write, so two DSH
- * windows stay consistent the same way the disabled set is.
- *
- * @module dsh-workbuddy-oauth/cooldown-state
- */
-/** Name of the state file inside the plugin state directory. */
-declare const COOLDOWN_STATE_FILENAME = "cooldowns.json";
-/** Read the persisted map, dropping entries that have already expired. */
-declare function readCooldowns(now?: number): Promise<Map<string, number>>;
-/**
- * Merge one entry into the persisted map atomically.
- *
- * Read-modify-write under a file lock so a toggle made in another DSH window is
- * not lost, mirroring {@link ../account-state.ts!setAccountDisabled}. A failed
- * write is reported to the caller's catch and never thrown: losing a
- * persistence update must not break the request that produced it.
- *
- * All three paths are computed **before the first await**, for the same reason
- * {@link readCooldowns} captures its path up front: this function is usually
- * called fire-and-forget, so its later awaits routinely outlive the environment
- * (and `DSH_HOME`) it was called under.
- */
-declare function writeCooldown(uid: string, untilMs: number, now?: number): Promise<void>;
-//#endregion
-//#region src/identity.d.ts
-/** The identity a chat request presents as. */
-interface ChatIdentity {
-  /** Desktop-app version; drives the desktop User-Agent and `X-IDE-Version`. */
-  clientVersion: string;
-  /** Bundled agent-CLI version; absent drops the `CLI/…` token. */
-  cliVersion?: string;
-}
-/** The identity a catalog request presents as. */
-interface AppVersionInfo {
-  version: string;
-  source: 'config' | 'fallback';
-}
-/** Where the identity values come from. Every field is optional. */
-interface IdentityConfig {
-  /** Desktop-app version to claim. */
-  appVersion?: string;
-  /** CLI version to claim; omit to drop the `CLI/…` token. */
-  cliVersion?: string;
-}
 //#endregion
 //#region src/probe.d.ts
 /**
@@ -982,69 +743,6 @@ declare class WorkBuddyCatalog {
   fallback(): readonly WorkBuddyModelInfo[];
 }
 //#endregion
-//#region src/shim.d.ts
-/**
- * Minimal logger surface the plugin context already provides.
- *
- * `info` exists so one line per chat request can report **which account served
- * it**. Selection behaviour (rotation, cooldown, session affinity) is otherwise
- * invisible: nothing about the response says which credential produced it, so
- * without this an operator cannot tell a working rotation from a stuck pool.
- */
-interface ShimLogger {
-  info(...args: unknown[]): void;
-  warn(...args: unknown[]): void;
-  error(...args: unknown[]): void;
-}
-/** What the plugin needs from a running shim. */
-interface WorkBuddyShim {
-  /** Resolves once the listener is up; rejects if listening failed. */
-  ready: Promise<void>;
-  /** The shim origin, e.g. `http://127.0.0.1:39271`; valid after ready. */
-  baseUrl(): string;
-  /**
-   * The per-process shared secret the plugin's own client must carry as
-   * `Authorization: Bearer <token>`. Lives only in memory; the adapter
-   * resolves this instead of the upstream access token, because the shim
-   * resolves the real credential itself via the store.
-   */
-  token(): string;
-  /** Stop serving and destroy open connections. */
-  close(): Promise<void>;
-}
-/** Constructor dependencies. */
-interface WorkBuddyShimOptions {
-  store: CredentialStore;
-  client: Pick<WorkBuddyUpstreamClient, 'chatStream'>;
-  catalog: WorkBuddyCatalog;
-  logger?: ShimLogger;
-  /**
-   * Port to bind on `127.0.0.1`, or `0` for an ephemeral one.
-   *
-   * A **stable** port matters now that the endpoint is published into the
-   * `llm-pi-ai` provider configuration: the route's `baseURL` names this origin,
-   * and an ephemeral port would make that configuration stale on every restart.
-   * The caller therefore asks for a fixed port and republishes the route if the
-   * port it actually got differs.
-   */
-  port?: number;
-  /**
-   * The bearer this endpoint requires, when the caller owns its lifetime.
-   *
-   * Ownership moved outward with the same change: the value now has to be
-   * stored in the credential seam under the reference the published route
-   * names, and a secret minted inside this function could not be handed out
-   * before the listener started. Omitting it mints a fresh one, which is still
-   * correct for an in-process caller that reads {@link WorkBuddyShim.token}.
-   */
-  token?: string;
-}
-/**
- * Start the loopback endpoint. Requests carry any bearer; the loopback bind
- * is the boundary, and the upstream credential comes from the store alone.
- */
-declare function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShim;
-//#endregion
 //#region src/probe-store.d.ts
 /**
  * Whether the model's effort parameter is actually validated.
@@ -1166,6 +864,319 @@ declare class WorkBuddyProbeStore {
    */
   private persist;
 }
+//#endregion
+//#region src/manual-providers.d.ts
+interface ManualProfile {
+  models: WorkBuddyModelInfo[];
+}
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'loader/volatile-update'(): void;
+  }
+}
+//#endregion
+//#region src/version.d.ts
+/**
+ * Build-time injected plugin version.
+ *
+ * `tsdown.config.ts` defines `__DSH_WORKBUDDY_OAUTH_VERSION__` from
+ * package.json. The declare + fallback keeps `tsc --noEmit` and vitest working
+ * on source that has not been through the bundler.
+ *
+ * @module dsh-workbuddy-oauth/version
+ */
+/** Version of this plugin, as published in package.json. */
+declare const PLUGIN_VERSION: string;
+//#endregion
+//#region src/fingerprint.d.ts
+/**
+ * Stable device fingerprint derivation.
+ *
+ * ## Why this exists
+ *
+ * The upstream treats requests as coming from a physical device. A client that
+ * invents a fresh machine id per process, or that sends none at all, looks like
+ * a new device every launch — the pattern upstream risk control is built to
+ * flag, and the one that gets multi-account setups correlated and blocked.
+ *
+ * The fix every mature project in this space converged on is the same:
+ * **derive the id deterministically from the account uid**, so each account
+ * always presents as one fixed device and different accounts present as
+ * different devices. Same uid plus same purpose yields the same id forever,
+ * across restarts and machines.
+ *
+ * ## Provenance
+ *
+ * The scheme (`md5("<salt>:<uid>")` truncated to 36 hex chars, with distinct
+ * salts per purpose) matches the reference implementations this plugin is
+ * modelled on — `workbuddy2api`'s `derive_id`, as carried by
+ * `ardeyouxipianyi/workbuddy2api-hub` and rebuilt for Rust in
+ * `NextAgentX/trae-workbuddy-switch`. Reusing the established derivation is
+ * deliberate: it is what upstream has been serving without issue.
+ *
+ * ## Scope: fingerprints are NOT for the login flow
+ *
+ * Checked against all three reference implementations: the OAuth calls
+ * (`auth/state`, `auth/token`, `login/account`) carry **only** the CLI user
+ * agent and the region's `Origin`/`Referer`. No `X-Machine-ID`, no
+ * `X-Session-ID`. Device headers appear on chat, billing and task endpoints.
+ *
+ * So this module is applied to outbound API calls and *not* to sign-in, which
+ * also keeps a sign-in from being tied to a device identity it does not need.
+ *
+ * @module dsh-workbuddy-oauth/fingerprint
+ */
+/**
+ * Derive a stable identifier for one account and purpose.
+ *
+ * The uid is required: without one there is no stable basis, and returning a
+ * constant would make every account share a device. Callers must therefore
+ * skip the header entirely when the uid is empty, which is why this returns
+ * `undefined` rather than a placeholder.
+ *
+ * @param purpose - What the id is for; `machine` and `session` are sent
+ *   upstream. Distinct purposes must not collide, so the value is part of the
+ *   hash input.
+ * @param uid - The account's uid from the OAuth account endpoint.
+ * @returns Hex characters of {@link DERIVED_ID_HEX_LENGTH}, or `undefined` when
+ *   there is no uid.
+ */
+declare function deriveId(purpose: string, uid: string): string | undefined;
+/** The two device headers the upstream expects, for one account. */
+interface DeviceHeaders {
+  'X-Machine-ID': string;
+  'X-Session-ID': string;
+}
+/**
+ * Build the device identity headers for one account.
+ *
+ * @returns The headers, or an empty object when `uid` is empty — sending a
+ *   blank header is worse than sending none, because upstream would record a
+ *   device with no identity.
+ */
+declare function deviceHeaders(uid: string): DeviceHeaders | Record<string, never>;
+/**
+ * A request id carrying a stable per-account prefix plus a unique suffix.
+ *
+ * @param uid - Account uid; an empty uid yields a shared `anonymous` prefix,
+ *   which is acceptable here because the id still has to be unique per call.
+ * @param now - Current epoch milliseconds, injectable for tests.
+ */
+declare function requestId(uid: string, now?: number): string;
+//#endregion
+//#region src/refresh.d.ts
+/** Outcome of a refresh attempt. */
+type RefreshOutcome = {
+  status: 'refreshed';
+  credential: WorkBuddyCredential;
+} | {
+  status: 'not-needed';
+  credential: WorkBuddyCredential;
+} | {
+  status: 'failed';
+  reason: string;
+};
+/** Injectable collaborators, so the logic is testable without a network. */
+interface RefreshDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  timeoutMs?: number;
+}
+/**
+ * Refresh one account's token if needed.
+ *
+ * Concurrent calls for the same uid share one request, and the cycle is
+ * serialized under the credential file lock so a second process re-reads the
+ * committed token instead of replaying a spent refresh token.
+ *
+ * @param uid - Account to refresh; its stored credential is the input.
+ * @param deps - Optional fetch/clock overrides.
+ */
+declare function refreshCredential(uid: string, deps?: RefreshDeps): Promise<RefreshOutcome>;
+//#endregion
+//#region src/store.d.ts
+/** Thrown when no usable credential exists; the shim maps this to HTTP 401. */
+declare class NotSignedInError extends Error {
+  constructor(message?: string);
+}
+/** What the ported code needs from a credential store. */
+interface CredentialStore {
+  /**
+   * Resolve the credential to serve the next request; refreshes if needed.
+   *
+   * @param sessionKey - optional conversation identity. When given, and an
+   *   account is already pinned to it and still selectable, that account wins —
+   *   so one conversation keeps one account instead of hopping mid-turn.
+   */
+  resolve(sessionKey?: string): Promise<WorkBuddyCredential>;
+  /** The current credential without refreshing, or `undefined` when none. */
+  current(): Promise<WorkBuddyCredential | undefined>;
+  /**
+   * Mark one account as failed, cooling it out of selection until `untilMs`.
+   *
+   * The store does not decide *how long* a failure cools an account — it only
+   * records the deadline, so it needs no knowledge of the upstream's error
+   * vocabulary. The shim (which already classifies upstream failures) computes
+   * the deadline and hands it over.
+   */
+  noteFailure(uid: string, untilMs: number): void;
+}
+/**
+ * Rotating selection: pick the next ready account in ring order.
+ *
+ * The single-account rule is stable here because a one-account pool always
+ * answers that account; rotation only becomes visible with two or more. Order
+ * of preference within one call:
+ *
+ * 1. unexpired token: choosing an expired one would spend a refresh cycle (and
+ *    a rotation) on a request that another account could serve as-is;
+ * 2. not currently cooled out (a recently failed account stays parked);
+ * 3. ring order from `cursor`, so load spreads instead of always hitting the
+ *    lexicographically-first account.
+ *
+ * When *every* account is cooled out, the soonest-to-recover account is served
+ * anyway — refusing would leave the whole pool unusable until a timer fires,
+ * and for a personal install a short wait on the least-bad account is better
+ * than a hard failure.
+ *
+ * Pure, and exported so the rule is testable without touching the filesystem.
+ * `credentials` are already filtered to one region by the caller: a credential
+ * is only ever valid for its own upstream host, so presenting a domestic token
+ * to the international service (or vice versa) is an authentication failure,
+ * and the caller knows which endpoint it is about to call.
+ *
+ * @returns the chosen credential and the next cursor, or `undefined` when none.
+ */
+declare function chooseRotating(credentials: readonly WorkBuddyCredential[], cursor: number, cooldownUntilMs: ReadonlyMap<string, number>, now?: number): {
+  credential: WorkBuddyCredential;
+  nextCursor: number;
+} | undefined;
+/** Options for {@link createCredentialStore}. */
+interface CredentialStoreOptions {
+  /**
+   * Region this store serves.
+   *
+   * Each region gets its own store because a credential is only valid against
+   * its own upstream host. Without this filter a domestic and an international
+   * account would be interchangeable to a store, and the shim would present the
+   * wrong region's token.
+   */
+  region?: WorkBuddyRegion;
+  /** Clock, injectable for tests. */
+  now?: () => number;
+  /** Refresh hook, injectable for tests. Defaults to {@link refreshCredential}. */
+  refresh?: typeof refreshCredential;
+}
+/**
+ * Build the credential store the ported shim and adapter consume.
+ *
+ * `resolve()` refreshes when the chosen token is at or near expiry, and
+ * reports {@link NotSignedInError} when nothing is stored — the shim turns that
+ * into a 401 carrying the message, so an unconfigured install reports "sign in"
+ * rather than an opaque failure.
+ */
+declare function createCredentialStore(options?: CredentialStoreOptions): CredentialStore;
+//#endregion
+//#region src/cooldown-state.d.ts
+/**
+ * Persisted failure cooldowns.
+ *
+ * The cooldown map (`uid → cool-until epoch ms`) lives in memory while the
+ * process runs. This module adds a write-through disk copy so a DSH restart does
+ * not resurrect a cooled account: an account that exhausted its credit an hour
+ * ago must not be retried on the next start, because the failure it would hit is
+ * exactly the one the cooldown exists to avoid.
+ *
+ * Deliberately **not** persisted: the rotation cursor (restarting from account
+ * one is harmless) and session affinity (a 30-minute TTL that a restart exceeds
+ * anyway — conversations do not survive a host restart).
+ *
+ * The file is read when the store is built and on every write, so two DSH
+ * windows stay consistent the same way the disabled set is.
+ *
+ * @module dsh-workbuddy-oauth/cooldown-state
+ */
+/** Name of the state file inside the plugin state directory. */
+declare const COOLDOWN_STATE_FILENAME = "cooldowns.json";
+/** Read the persisted map, dropping entries that have already expired. */
+declare function readCooldowns(now?: number): Promise<Map<string, number>>;
+/**
+ * Merge one entry into the persisted map atomically.
+ *
+ * Read-modify-write under a file lock so a toggle made in another DSH window is
+ * not lost, mirroring {@link ../account-state.ts!setAccountDisabled}. A failed
+ * write is reported to the caller's catch and never thrown: losing a
+ * persistence update must not break the request that produced it.
+ *
+ * All three paths are computed **before the first await**, for the same reason
+ * {@link readCooldowns} captures its path up front: this function is usually
+ * called fire-and-forget, so its later awaits routinely outlive the environment
+ * (and `DSH_HOME`) it was called under.
+ */
+declare function writeCooldown(uid: string, untilMs: number, now?: number): Promise<void>;
+//#endregion
+//#region src/shim.d.ts
+/**
+ * Minimal logger surface the plugin context already provides.
+ *
+ * `info` exists so one line per chat request can report **which account served
+ * it**. Selection behaviour (rotation, cooldown, session affinity) is otherwise
+ * invisible: nothing about the response says which credential produced it, so
+ * without this an operator cannot tell a working rotation from a stuck pool.
+ */
+interface ShimLogger {
+  info(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+}
+/** What the plugin needs from a running shim. */
+interface WorkBuddyShim {
+  /** Resolves once the listener is up; rejects if listening failed. */
+  ready: Promise<void>;
+  /** The shim origin, e.g. `http://127.0.0.1:39271`; valid after ready. */
+  baseUrl(): string;
+  /**
+   * The per-process shared secret the plugin's own client must carry as
+   * `Authorization: Bearer <token>`. Lives only in memory; the adapter
+   * resolves this instead of the upstream access token, because the shim
+   * resolves the real credential itself via the store.
+   */
+  token(): string;
+  /** Stop serving and destroy open connections. */
+  close(): Promise<void>;
+}
+/** Constructor dependencies. */
+interface WorkBuddyShimOptions {
+  store: CredentialStore;
+  client: Pick<WorkBuddyUpstreamClient, 'chatStream'>;
+  catalog: WorkBuddyCatalog;
+  logger?: ShimLogger;
+  /**
+   * Port to bind on `127.0.0.1`, or `0` for an ephemeral one.
+   *
+   * A **stable** port matters now that the endpoint is published into the
+   * `llm-pi-ai` provider configuration: the route's `baseURL` names this origin,
+   * and an ephemeral port would make that configuration stale on every restart.
+   * The caller therefore asks for a fixed port and republishes the route if the
+   * port it actually got differs.
+   */
+  port?: number;
+  /**
+   * The bearer this endpoint requires, when the caller owns its lifetime.
+   *
+   * Ownership moved outward with the same change: the value now has to be
+   * stored in the credential seam under the reference the published route
+   * names, and a secret minted inside this function could not be handed out
+   * before the listener started. Omitting it mints a fresh one, which is still
+   * correct for an in-process caller that reads {@link WorkBuddyShim.token}.
+   */
+  token?: string;
+}
+/**
+ * Start the loopback endpoint. Requests carry any bearer; the loopback bind
+ * is the boundary, and the upstream credential comes from the store alone.
+ */
+declare function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShim;
 //#endregion
 //#region src/probe-service.d.ts
 /** What the caller learns about a completed probe. */
@@ -1324,6 +1335,8 @@ interface WorkBuddyWebProbeModel {
 }
 /** One published `llm-pi-ai` route, as the card reports it. */
 interface WorkBuddyWebRoute {
+  settingsNs?: string;
+  selectedModelIds?: readonly string[];
   /** Provider key under `llm-pi-ai`'s `providers` dict, e.g. `workbuddy-oauth-ai`. */
   providerId: string;
   /**
@@ -1523,7 +1536,8 @@ interface WorkBuddyControlRouteOptions {
    * button always publishes what the card is showing rather than a list the
    * browser sent.
    */
-  syncProvider?: () => Promise<WorkBuddyControlResult>;
+  syncProvider?: (modelIds: string[]) => Promise<WorkBuddyControlResult>;
+  removeProvider?: () => Promise<WorkBuddyControlResult>;
   /** Route path to mount; defaults to {@link WORKBUDDY_CONTROL_PATH}. */
   path?: string;
 }
@@ -1682,8 +1696,16 @@ interface Config {
   cliVersion?: string;
   /** Region to sign in to when no argument is given. */
   region?: string;
+  providers?: Volatile<Record<string, ManualProfile>>;
 }
-declare const Config: z<Config>;
+/** Serialized input keeps provider snapshots plain; normalized output is volatile. */
+interface ConfigInput {
+  appVersion?: string;
+  cliVersion?: string;
+  region?: string;
+  providers?: Record<string, ManualProfile>;
+}
+declare const Config: z<ConfigInput, Config>;
 /**
  * The stable identity key for a credential, or `undefined` when it has no uid.
  *
@@ -1701,4 +1723,4 @@ declare function accountIdentityOf(credential: Pick<WorkBuddyCredential, 'uid' |
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { ALL_REGIONS, AUTOMATIC_PROBING_AUTHORIZED, COOLDOWN_STATE_FILENAME, Config, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, LoginClient, LoginExpiredError, LoginPendingError, NotSignedInError, PLUGIN_VERSION, PROBE_EFFORT_CANDIDATES, SHIM_PORT_FOR, WORKBUDDY_AI_CONTROL_PATH, WORKBUDDY_AI_PROVIDER, WORKBUDDY_CONTROL_KEY_HEADER, WORKBUDDY_CONTROL_PATH, WORKBUDDY_PROVIDER, WORKBUDDY_STATUS_PATH, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WorkBuddyCatalog, type WorkBuddyControlResult, type WorkBuddyCredential, type WorkBuddyModelInfo, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyRegion, type WorkBuddyWebAccount, type WorkBuddyWebModel, type WorkBuddyWebProbeModel, type WorkBuddyWebRegion, type WorkBuddyWebRoute, type WorkBuddyWebStatus, accountIdentityOf, apply, chooseRotating, controlPathFor, createControlKey, createCredentialStore, createWorkBuddyShim, credentialFromLogin, deriveId, deviceHeaders, displayNameOf, fingerprintModel, inject, listCredentials, maskPhoneNumbers, name, parseRegionInput, probeModel, providerIdFor, readCooldowns, regionEndpoints, regionOfDomain, requestId, workBuddyControlHandler, workBuddyStatusHandler, workBuddyWebStatus, workbuddyProbePath, writeCooldown };
+export { ALL_REGIONS, AUTOMATIC_PROBING_AUTHORIZED, COOLDOWN_STATE_FILENAME, Config, ConfigInput, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, LoginClient, LoginExpiredError, LoginPendingError, NotSignedInError, PLUGIN_VERSION, PROBE_EFFORT_CANDIDATES, SHIM_PORT_FOR, WORKBUDDY_AI_CONTROL_PATH, WORKBUDDY_AI_PROVIDER, WORKBUDDY_CONTROL_KEY_HEADER, WORKBUDDY_CONTROL_PATH, WORKBUDDY_PROVIDER, WORKBUDDY_STATUS_PATH, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WorkBuddyCatalog, type WorkBuddyControlResult, type WorkBuddyCredential, type WorkBuddyModelInfo, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyRegion, type WorkBuddyWebAccount, type WorkBuddyWebModel, type WorkBuddyWebProbeModel, type WorkBuddyWebRegion, type WorkBuddyWebRoute, type WorkBuddyWebStatus, accountIdentityOf, apply, chooseRotating, controlPathFor, createControlKey, createCredentialStore, createWorkBuddyShim, credentialFromLogin, deriveId, deviceHeaders, displayNameOf, fingerprintModel, inject, listCredentials, maskPhoneNumbers, name, parseRegionInput, probeModel, providerIdFor, readCooldowns, regionEndpoints, regionOfDomain, requestId, workBuddyControlHandler, workBuddyStatusHandler, workBuddyWebStatus, workbuddyProbePath, writeCooldown };

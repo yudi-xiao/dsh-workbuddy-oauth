@@ -66,7 +66,7 @@ interface Route {
  * a hard dependency. Passing it here is what makes `apply` register the routes,
  * which is how the "browser profile" case is exercised at all.
  */
-function fakeContext(): {
+function fakeContext(providers: Record<string, unknown> = {}): {
   ctx: Context
   registrations: Registration[]
   effects: Array<() => void>
@@ -83,11 +83,9 @@ function fakeContext(): {
   const injected: string[] = []
   const mutations: Array<{ ns: string; ops: unknown[] }> = []
   const secrets = new Map<string, string>()
-  /** Stand-in for the `llm-pi-ai` section a publish writes into. */
-  const providers: Record<string, unknown> = {}
   const settings = {
     describe: () => [{
-      ns: 'llm-pi-ai',
+      ns: 'own-workbuddy',
       autoGenerate: true,
       schema: {},
       value: { providers },
@@ -110,10 +108,13 @@ function fakeContext(): {
   }
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    on: vi.fn(),
     llm: {
+      registerConfigurableProviders: vi.fn(() => Object.assign(() => {}, { replace: vi.fn() })),
       registerAdapter(providerIds: readonly string[], adapter: Registration['adapter']) {
-        registrations.push({ providerIds, adapter })
-        return () => {}
+        const entry = { providerIds, adapter }
+        registrations.push(entry)
+        return Object.assign(() => {}, { replace: (next: readonly string[]) => { entry.providerIds = next } })
       },
     },
     commands: {
@@ -122,7 +123,7 @@ function fakeContext(): {
     settings,
     credentials,
     get(name: string) {
-      if (name === 'configEditor') return { entries: () => [{ options: { name: '@deepseek-ai/dsh-llm-pi-ai', id: 'llm-pi-ai' } }] }
+      if (name === 'configEditor') return { entries: () => [{ options: { name: 'dsh-workbuddy-oauth', id: 'own-workbuddy' } }] }
       if (name === 'settings') return settings
       if (name === 'credentials') return credentials
       return undefined
@@ -190,7 +191,7 @@ describe('provider ids', () => {
 })
 
 describe('apply', () => {
-  it('publishes both regions without throwing', async () => {
+  it('starts both regional endpoints without throwing', async () => {
     // Regression: the shipped build threw here with
     // `workbuddy shim has no listening address`.
     const { ctx } = fakeContext()
@@ -202,16 +203,45 @@ describe('apply', () => {
     // route is asserted with a signed-in account below.
   })
 
-  it('registers no adapter of its own', async () => {
-    // The whole point of the change: `llm-pi-ai` owns the route now. An adapter
-    // registered here would collide with the published route (`an adapter for
-    // provider "workbuddy-oauth-ai" is already registered`) and make the models
-    // silently unavailable.
+  it('registers no adapter until explicitly configured', async () => {
     const { ctx, registrations } = fakeContext()
     apply(ctx, { appVersion: '', cliVersion: '', region: 'cn' })
     await settle()
 
     expect(registrations).toEqual([])
+    expect(ctx.llm.registerConfigurableProviders).toHaveBeenCalledTimes(2)
+  })
+
+  it('exposes only saved snapshots and keeps deletion/empty state across reload', async () => {
+    const saved = { id: 'saved-only', name: 'Saved', contextWindow: 12345, maxTokens: 1000, supportsImages: false }
+    const providers: Record<string, unknown> = { [WORKBUDDY_PROVIDER]: { models: [saved] } }
+    const { ctx, registrations, mutations } = fakeContext(providers)
+    apply(ctx, { appVersion: '', cliVersion: '', region: 'cn' })
+    await settle()
+    expect(registrations).toHaveLength(1)
+    const list = () => (registrations[0]!.adapter as { listModels: (provider: string) => Promise<Array<{ id: string }>> }).listModels(WORKBUDDY_PROVIDER)
+    expect((await list()).map(model => model.id)).toEqual(['saved-only'])
+    const notify = () => {
+      for (const [event, callback] of vi.mocked(ctx.on).mock.calls as unknown as Array<[string, () => void]>) {
+        if (event === 'loader/volatile-update') callback()
+      }
+    }
+    providers[WORKBUDDY_PROVIDER] = { models: [] }
+    notify()
+    expect(await list()).toEqual([])
+    const emptyReload = fakeContext(providers)
+    apply(emptyReload.ctx, { appVersion: '', cliVersion: '', region: 'cn' })
+    await settle()
+    expect(emptyReload.registrations).toHaveLength(1)
+    delete providers[WORKBUDDY_PROVIDER]
+    notify()
+    expect(registrations[0]!.providerIds).toEqual([])
+    const deletedReload = fakeContext(providers)
+    apply(deletedReload.ctx, { appVersion: '', cliVersion: '', region: 'cn' })
+    await settle()
+    expect(deletedReload.registrations).toEqual([])
+    expect(mutations).toEqual([])
+    expect(deletedReload.mutations).toEqual([])
   })
 
   it('logs no error while starting', async () => {

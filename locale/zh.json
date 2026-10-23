@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH WorkBuddy OAuth",
+    "description": "通过 OAuth 设备码登录 WorkBuddy 国内版与国际版账号，在设置中手动添加区域服务商并选择模型。"
+  }
+}

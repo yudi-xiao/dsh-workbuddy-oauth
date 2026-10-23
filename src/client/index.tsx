@@ -1,12 +1,11 @@
 /**
- * Browser half: the WorkBuddy account card and read-only model catalog.
+ * Browser half: WorkBuddy accounts and explicit native provider registration.
  *
  * Settings registration is guarded; client failures do not take down the Host.
  *
- * Only DSH 0.1.6+'s Plugins page seam (`plugins.bundle.config`, keyed by the
- * bundle's package name) is registered: the 0.1.5 `settings.plugin.item` slot no
- * longer exists on the running host, and registering a seam the host never
- * declares is exactly what makes it silently never run.
+ * Uses the Plugins page (`plugins.bundle.config`, keyed by bundle name) and
+ * native provider cards (`settings.models.provider-card`, keyed by the live
+ * settings namespace). It never restores removed provider selections.
  *
  * @module dsh-workbuddy-oauth/client
  */
@@ -20,6 +19,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { WorkBuddyConfigPage } from './WorkBuddyConfigPage.tsx'
+import { WorkBuddyProviderCard } from './WorkBuddyProviderCard.tsx'
+import { readStatus } from './host.ts'
 import { installStyles } from './styles.ts'
 import { en, zh, type WorkBuddyLocaleKey } from './locales.ts'
 
@@ -74,6 +75,30 @@ export function apply(ctx: ClientContext): void {
   guardClientContribution('stylesheet', () => { installStyles() })
   guardClientContribution('settings copy', () => {
     ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-workbuddy-oauth: settings copy')
+  })
+
+  guardClientContribution('settings.models.provider-card', () => {
+    ctx.slots.inject('settings.models.provider-card', () => {
+      const abort = new AbortController()
+      const disposers: (() => void)[] = []
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let attempts = 0
+      const register = async () => {
+        const status = await readStatus(abort.signal)
+        if (abort.signal.aborted) return
+        const namespaces = new Set(status?.regions.flatMap(region => region.route.settingsNs ? [region.route.settingsNs] : []) ?? [])
+        if (namespaces.size) {
+          for (const key of namespaces) {
+            const dispose = guardClientContribution('manual provider card', () => ctx.slots.register({
+              name: 'settings.models.provider-card', key, locale: namespace,
+            }, WorkBuddyProviderCard))
+            if (dispose) disposers.push(dispose)
+          }
+        } else if (++attempts < 12) timer = setTimeout(() => { void register() }, 5000)
+      }
+      void register()
+      return () => { abort.abort(); clearTimeout(timer); for (const dispose of disposers) dispose() }
+    })
   })
 
   // The Plugins-page configuration entry, keyed by the bundle's package name as

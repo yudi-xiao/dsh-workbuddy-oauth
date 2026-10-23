@@ -3,13 +3,71 @@
 Upstream: https://github.com/molly-ovo/dsh-workbuddy-oauth
 Base commit: 3fcb35d6a0d147b5e97bfc076c8d2a9a2ddcce29
 Base version: 0.0.4
-Local version: 0.0.5-dsh021.2
+Local source package version: 0.0.5-dsh021.3
 Reviewed protocol patch: PR #1, exact head c0aef77b13a5eb5d97e293fa9ba8a869b377675b.
 
 This repository is a maintained branch of that upstream, tracking **DSH
 Desktop 0.2.1-rc.2** and pi-ai **1.1.0**. It is not an upstream release.
 
-## Changes
+## Current manual provider-directory contract (0.0.5-dsh021.3)
+
+This version moves new regional providers into the plugin's own namespace. In
+**Settings → Models → Add → Third-party**, the configurable entries are
+**WorkBuddy CN** and **WorkBuddy Global**. Use the WorkBuddy custom provider card
+to explicitly select models and save them with the card's own Save controls.
+An upstream catalog is a list of candidates, not a selection or an instruction
+to publish every model.
+
+- Startup, OAuth login and catalog refresh must not seed missing routes or
+  models. Deleted providers/models and an explicitly empty selection remain
+  deleted/empty until the user chooses and saves otherwise.
+- Existing `llm-pi-ai.providers` routes are left untouched. Where an old route
+  collides with a new regional entry, suppress the colliding new registration;
+  do not replace, migrate or delete the old route automatically. The user must
+  manually remove the old route before adding the new regional provider.
+  Record any old model settings that need to be recreated before removal.
+- The existing OAuth account UI and commands remain the account-management
+  entry points. Authentication does not itself add a provider or select models.
+- DSH 0.2.1-rc.2's generic unknown-namespace editor may display a hint or disable
+  its Save button. The supported editing path is the WorkBuddy card's Save
+  controls, not an assertion that the native generic editor supports every
+  plugin namespace.
+- English and Chinese `meta.title` / `meta.description` resources and a tiny
+  original WB monogram are exported. The WB artwork is original to this
+  package and distributed under its MIT license; it is not an official logo.
+
+### Verification boundary for this revision
+
+Verified locally on DSH Desktop 0.2.1-rc.2:
+
+- Host and Client TypeScript checks passed; 29 test files / 374 tests passed.
+- Host JS/declarations and Client CJS bundles rebuilt successfully; both JS
+  bundles passed Node syntax checks and `git diff --check` passed.
+- Packed 0.0.5-dsh021.3 and installed it through the live plugin manager,
+  replacing 0.0.5-dsh021.1; the manager reported `application: applied`.
+- The existing GUI's Third-party provider picker displayed both
+  `WorkBuddy (国内版)` and `WorkBuddy AI (国际版)`. Selecting Global rendered
+  the WorkBuddy custom registration card beneath the native editor.
+- Isolated tests cover explicit subsets, saving an empty list, deletion/reload,
+  preserving legacy routes, and read-only reconciliation after legacy changes.
+  No user provider/model was added or restored during GUI verification.
+
+Actual user-profile Save/delete and application restart were deliberately not
+exercised; persistence behavior is supported by isolated tests, not a claim of
+live user-profile roundtrip verification. New OAuth sign-in, live upstream
+requests, installed metadata localization and icon appearance were not retested
+for this revision. The native generic Save remains disabled for this custom
+namespace; use the WorkBuddy card's own Save control.
+
+All records below are **historical** and retain their original version and
+verification scope. In particular, prior autoseeding, explicit full-catalog
+import and `llm-pi-ai` ownership describe the old design, not the current
+manual-provider contract. Historical test counts, installs and live checks
+are not evidence for .3. The old conclusion about a sign-in-only row applies
+to attempting to overwrite an `llm-pi-ai`-owned entry, not to a plugin-owned
+namespace with its own card.
+
+## Historical changes
 
 - Retain pi-ai ^1.1.0 peer / 1.1.0 development dependency and matching source/bundle version guard. Do not downgrade the host.
 - Target host packages `0.2.1-rc.2`: peer ranges are `^0.2.1-rc.2` and devDependencies pin `0.2.1-rc.2` (`@deepseek-ai/cordis` 4.0.5, `@deepseek-ai/schemastery` 3.18.5). The 0.2.0 peer set cannot resolve against the 0.2.1 `dsh-llm-pi-ai`, whose `PiAiAdapter` is typed against a later pi-ai; the install then carries two pi-ai copies and `tsc` fails on `TranscriptContext`'s brand property.
