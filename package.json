@@ -49,9 +49,6 @@
     "llm",
     "oauth"
   ],
-  "pnpm": {
-    "onlyBuiltDependencies": []
-  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
