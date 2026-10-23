@@ -3,7 +3,7 @@
 Upstream: https://github.com/molly-ovo/dsh-workbuddy-oauth
 Base commit: 3fcb35d6a0d147b5e97bfc076c8d2a9a2ddcce29
 Base version: 0.0.4
-Local version: 0.0.4-dsh021.2
+Local version: 0.0.5-dsh021.1
 Reviewed protocol patch: PR #1, exact head c0aef77b13a5eb5d97e293fa9ba8a869b377675b.
 
 This repository is a maintained branch of that upstream, tracking **DSH
@@ -55,19 +55,107 @@ All of the following ran in this repository's own checkout with
   being installable; a host generation change means updating the peer/dev ranges
   before these checks mean anything again.
 
+## Model configuration ownership (0.0.5-dsh021.1)
 
-## 本地原生模型所有权重构（0.0.5-dsh021.1）
+Public commit boundary: `c6af050`. Everything below is local work after it.
 
-公开提交边界为 `c6af050`；本节描述其后的本地工作，不表示已发布或已安装验证。
+The plugin no longer registers a pi-ai adapter of its own. WorkBuddy's routes
+are ordinary `llm-pi-ai` provider entries, so DSH's Models page owns the model
+list and there is one place that decides what a route serves.
 
-- DSH 原生 `llm-pi-ai.providers` 管理模型。插件只负责账号、回环连接和只读上游目录，不提供第二套模型编辑器。
-- 已有路由的模型列表不会因启动、登录或刷新目录自动替换；缺失路由可初始化模型。
-- 卡片保留显式 `sync-provider` 导入，并在发送前提示确认：它会替换对应 provider 的模型列表，覆盖用户的原生模型编辑。普通刷新不执行导入。
-- 移除隐藏模型复选框、最大上下文开关和 composer 探测注册。旧探测结果不再控制原生模型目录或推理档位。账号、积分和登录保留。
-- 请在 **DSH 设置 → 模型** 编辑模型、上下文窗口与推理选项。
+- `provider-config.ts` turns a region's catalog into a route entry: endpoint,
+  protocol, a per-region credential reference, `compat.maxTokensField`, and
+  models carrying context window, output cap, modalities and effort levels.
+- `route-publisher.ts` writes that entry through the settings seam, serialized
+  across both regions because they share one settings revision. It seeds a
+  **missing** route once. An existing route is never rewritten: its models and
+  every other field the user configured are preserved. Only an explicit
+  `sync-provider` replaces `models`, and even then the endpoint, credential
+  reference and custom keys stay as the user left them. A route whose endpoint
+  or credential reference was customised is refused rather than overwritten.
+- The endpoint's bearer goes to the credential seam under a per-region
+  reference, so no secret enters the configuration file. The legacy shared
+  `WORKBUDDY_OAUTH_TOKEN` is migrated on the next publish.
+- `provider-directory.ts` advertises each route with
+  `nativeAuth: { env: [], oauth: true }`. That pair is what makes the Models
+  page render a **sign-in button instead of an endpoint/API-key form** — the
+  presentation `openai-codex` gets from being a pi-ai catalog provider. A
+  third-party plugin cannot join pi-ai's build-time catalog, so this directory
+  entry is the closest equivalent the host exposes.
+- `authorization-flow.ts` registers the sign-in behind that button under the
+  `llm-pi-ai/<provider>` credential key, driving the same `begin`/`complete`
+  pair as `/wb-login`. It deliberately commits **no** pi-ai credential record:
+  accounts stay in this plugin's own per-file store, which is what keeps the
+  rotating pool, per-account cooldown and session affinity working.
+- The settings card shows the upstream catalog read-only and reports the
+  published route's state. It offers an explicitly confirmed import that
+  replaces the route's model list, and says so before doing it. Model
+  visibility, the maximum-window switch and the composer reasoning probe are
+  gone: those decisions belong to the Models page now.
 
-### 验证边界
+### Session affinity
 
-本次未安装插件、未登录、未发起真实聊天或导入请求；Client Slot 运行时读取超时，因此不声称在线 UI 验证。上面的 325 测试与离线加载结果仅属于历史版本，不能作为此次重构的验证结果。
+The published route cannot send `x-session-id` — pi-ai withholds
+`sendSessionAffinityHeaders` from configuration — so the shim derives the
+affinity key from the request body: a digest of the conversation's first user
+message. Same conversation, same account; a different conversation may rotate.
 
-本次 Client 独立 TypeScript 检查通过。并行重构期间全套测试快照为 346 通过 / 3 失败：固定回环端口占用、登出后目录应为空的旧断言，以及国际版凭据引用的旧断言；尚不能宣称全套通过。完整 Host 类型检查也受并行接口改动影响，需集成后重新验证。
+Limits of that derivation, stated because they are not obvious:
+
+- Two distinct conversations whose first user message is byte-identical share
+  one affinity key, and therefore one account.
+- Compacting or editing history so the first user message changes produces a
+  new key, which may move that conversation to another account. Messages stay
+  in DSH, so the context is not lost — only the account binding is.
+
+This is weaker than a true session id and is not claimed to be isolation.
+
+## Build and verification
+
+All of the following ran in this repository's own checkout with
+`pnpm install --frozen-lockfile` and the lockfile committed here.
+
+- `pnpm typecheck` — both projects (`tsconfig.json` for the Host half,
+  `tsconfig.client.json` for the browser half) exit 0 against DSH
+  `0.2.1-rc.2` and pi-ai `1.1.0`.
+- `pnpm test` — Vitest, 28 files / 374 tests, all passing. The suite never
+  touches the network: upstream chat, probe, catalog refresh and OAuth calls
+  are mocked, and the loopback shim is exercised over real local HTTP.
+- `pnpm build` — tsdown emits `lib/index.js` + `lib/index.d.ts` (ESM, Host) and
+  `lib/client.js` (CJS, browser).
+- Both emitted bundles pass `node --check`; importing `lib/index.js` yields the
+  expected `name`/`inject`/`Config` exports and both provider ids
+  (`workbuddy-oauth`, `workbuddy-oauth-ai`).
+
+### Live status
+
+An earlier 0.0.5 build was installed into the desktop profile and confirmed to
+start: both listeners bind 39271/39272, the status route reports the new
+`route` field per region, and the international route was written into the
+profile's `llm-pi-ai.providers` with two models.
+
+**The OAuth presentation has not been observed in a running DSH yet.** The
+directory registration and sign-in flow were added after that install, so these
+still need a restart to confirm:
+
+1. Settings → Models lists WorkBuddy with a sign-in button and no endpoint or
+   API-key fields.
+2. Pressing it reaches the plugin's device-code login.
+3. An existing route's `apiKeyEnv` migrates from the legacy shared
+   `WORKBUDDY_OAUTH_TOKEN` to the per-region reference without touching its
+   models.
+
+## Limitations
+
+- IDs are process-salted, not persistent across restarts. Turn derivation
+  assumes retained message position/content; compacted or edited histories can
+  change IDs.
+- Without a usable user message, conversation identity falls back to the first
+  signable user content, as described under session affinity.
+- PR live 400/11128 claims are upstream-reported, not locally reproduced.
+  Offline passes do not establish authentication, actual upstream completion,
+  billing semantics, or resolution of every intercepted request. No
+  authentication/region changes or risk-control bypasses included.
+- `pnpm typecheck` and `pnpm test` depend on the DSH `0.2.1-rc.2` type packages
+  being installable; a host generation change means updating the peer/dev
+  ranges before these checks mean anything again.
